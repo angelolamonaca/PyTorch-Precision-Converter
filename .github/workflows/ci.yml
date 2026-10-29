@@ -7,22 +7,30 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - python: "3.10"
-          - python: "3.13"
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.13"
           # Oldest versions the package supports.
-          - python: "3.9"
+          - os: ubuntu-latest
+            python: "3.9"
             pins: "torch==2.1.0 safetensors==0.4.3 numpy==1.26.4"
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install
+        shell: bash
         run: |
           pip install torch ${{ matrix.pins }} --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[test]" ${{ matrix.pins }}

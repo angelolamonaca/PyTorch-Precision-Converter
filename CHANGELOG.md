@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.1.0
+
+### Added
+- `-p fp8_scaled`: ComfyUI's per-layer scaled FP8 format (`comfy_quant`, ComfyUI v0.4.0+). Linear weights get a
+  per-tensor scale, which keeps small weights accurate where a plain fp8 cast loses them. Embeddings, norms,
+  biases and convolutions stay in their original precision.
+- `--like REFERENCE` (a path or URL; only the header and two small layers are read) quantizes exactly the layers
+  that an official fp8_scaled, int8 or fp8 file quantizes, for fine-tunes of models Comfy-Org has released, scales
+  them the way the reference does (most Comfy-Org text encoders map each layer's largest weight to 416 instead of
+  448), and renames tensors to the reference's names when they differ by a prefix. `--rename OLD=NEW` renames by
+  hand.
+- Scaled FP8 input is dequantized before converting: block-scaled FP8 (DeepSeek-V3/R1, Qwen3 FP8),
+  compressed-tensors FP8, and all three ComfyUI layouts.
+- Model folders as input: every weight file is converted, shard indexes are rewritten, `config.json` gets the new
+  `torch_dtype` and loses `quantization_config` after dequantizing, and other files are copied. `--skip-files`
+  copies matching weight files unchanged.
+- Shard indexes (`*.safetensors.index.json`) as input, to merge shards into one file; `--max-shard-size` splits
+  safetensors output into shards with an index.
+- `--report` measures each tensor's relative error; `--max-error` with `--fallback` stores the tensors that would
+  lose too much at another precision.
+- `--key` picks the state dict inside a training checkpoint; `model`, `module`, `model_state_dict` and `net` are
+  now found automatically, like `state_dict`.
+- `--json` output, `-q/--quiet`, and torch/safetensors versions in `--version`.
+- `--info` names the layouts it recognises (scaled FP8 variants, EMA, LoRA) and shows nested keys and shards.
+- Python API: `open_checkpoint`, `iter_convert`, `write_safetensors`, `convert_folder`, `quantize_scaled`,
+  `dequantize`; the package ships type hints.
+
+### Changed
+- safetensors files are read lazily and written one tensor at a time, and PyTorch checkpoints are memory-mapped,
+  so memory use stays near one tensor instead of the whole model.
+- safetensors input produces safetensors output by default.
+- Output to `.pt`, `.pth` or `.bin` stays a plain state dict when the input was one; `.ckpt` output is still
+  wrapped in `{"state_dict": ...}`.
+- A star request is printed to stderr after a successful conversion; `--quiet` and `--json` leave it out.
+
+### Fixed
+- Scaled FP8 weights were cast without applying their scales, so 2.0.0 produced wrong weights for scaled FP8
+  input. They are now dequantized.
+
 ## 2.0.0
 
 ### Fixed
