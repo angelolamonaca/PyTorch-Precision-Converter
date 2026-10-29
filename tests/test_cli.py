@@ -1,3 +1,5 @@
+import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -5,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from precision_converter.cli import main
 
@@ -96,8 +98,6 @@ def test_clamping_warning(tmp_path, capsys):
 
 
 def test_unsafe_checkpoint_error_message(tmp_path, capsys):
-    import argparse
-
     src = tmp_path / "m.ckpt"
     torch.save({"state_dict": {"w": torch.ones(1)}, "args": argparse.Namespace()}, src)
     assert main([str(src), "-p", "fp16"]) == 1
@@ -114,3 +114,98 @@ def test_convert_py_shim_still_works(ckpt):
     )
     assert result.returncode == 0, result.stderr
     assert ckpt.with_name("model-full-fp16.safetensors").exists()
+
+
+def run_json(argv, capsys):
+    assert main(argv + ["--json"]) == 0
+    captured = capsys.readouterr()
+    assert "⭐" not in captured.err  # machine output stays clean
+    return json.loads(captured.out)
+
+
+def test_safetensors_input_defaults_to_safetensors_output(tmp_path):
+    src = tmp_path / "m.safetensors"
+    save_file({"w": torch.randn(4)}, src)
+    assert main([str(src), "-p", "bf16"]) == 0
+    assert (tmp_path / "m-full-bf16.safetensors").exists()
+
+
+def test_json_output(tmp_path, capsys):
+    src = tmp_path / "m.safetensors"
+    save_file({"a.weight": torch.randn(8, 8) * 0.01, "n.weight": torch.ones(8)}, src)
+    data = run_json([str(src), "-p", "fp8_scaled", "--report"], capsys)
+    assert data["ok"] and data["scaled"] == 1 and data["output"].endswith("m-full-fp8_scaled.safetensors")
+    assert data["errors"]["largest"][0]["key"] == "a.weight"
+    assert data["output_bytes"] > 0
+
+
+def test_info_json(tmp_path, capsys):
+    q = torch.randn(4, 4).to(torch.float8_e4m3fn)
+    save_file({"a.weight": q, "a.weight_scale_inv": torch.ones(1, 1)}, tmp_path / "m.safetensors")
+    assert main([str(tmp_path / "m.safetensors"), "--info", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["tensors"] == 2 and "block-scaled FP8 (DeepSeek / Qwen style)" in data["formats"]
+
+
+def test_star_line_and_quiet(tmp_path, capsys):
+    src = tmp_path / "m.safetensors"
+    save_file({"w": torch.randn(4)}, src)
+    assert main([str(src), "-p", "fp16"]) == 0
+    captured = capsys.readouterr()
+    assert "github.com/angelolamonaca/PyTorch-Precision-Converter" in captured.err
+    assert main([str(src), "-p", "bf16", "-q"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
+def test_merge_shards_from_index(tmp_path, capsys):
+    save_file({"a": torch.ones(2)}, tmp_path / "model-00001-of-00002.safetensors")
+    save_file({"b": torch.zeros(3)}, tmp_path / "model-00002-of-00002.safetensors")
+    weight_map = {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    data = run_json([str(tmp_path / "model.safetensors.index.json"), "-o", str(tmp_path / "merged.safetensors")], capsys)
+    assert data["files"] == [str(tmp_path / "merged.safetensors")]
+    merged = load_file(tmp_path / "merged.safetensors")
+    assert set(merged) == {"a", "b"}
+
+
+def test_split_into_shards(tmp_path, capsys):
+    src = tmp_path / "big.safetensors"
+    save_file({f"t{i}": torch.randn(256) for i in range(4)}, src)
+    out = tmp_path / "out" / "model.safetensors"
+    out.parent.mkdir()
+    data = run_json([str(src), "-o", str(out), "--max-shard-size", "2KiB"], capsys)
+    assert len(data["files"]) == 3  # 2 shards + index
+    assert (out.parent / "model.safetensors.index.json").exists()
+
+
+def test_folder_input(tmp_path, capsys):
+    root = tmp_path / "model"
+    root.mkdir()
+    save_file({"w": torch.randn(4, 4)}, root / "model.safetensors")
+    (root / "config.json").write_text(json.dumps({"torch_dtype": "float32"}))
+    data = run_json([str(root), "-p", "bf16"], capsys)
+    assert data["output"] == str(tmp_path / "model-bf16")
+    assert data["updated_configs"] == ["config.json"]
+    with pytest.raises(SystemExit):
+        main([str(root), "-p", "bf16"])  # output exists now
+
+
+def test_nested_key_message(tmp_path, capsys):
+    torch.save({"model": {"w": torch.ones(2)}, "epoch": 1}, tmp_path / "train.pt")
+    assert main([str(tmp_path / "train.pt"), "-p", "fp16", "-o", str(tmp_path / "w.pt")]) == 0
+    assert "Using the weights under the 'model' key" in capsys.readouterr().out
+    assert list(torch.load(tmp_path / "w.pt")) == ["w"]  # .pt output stays a plain state dict
+
+
+def test_error_as_json(tmp_path, capsys):
+    src = tmp_path / "m.ckpt"
+    torch.save({"state_dict": {"w": torch.ones(1)}, "args": argparse.Namespace()}, src)
+    assert main([str(src), "-p", "fp16", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_version_mentions_torch(capsys):
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert "torch" in capsys.readouterr().out

@@ -1,0 +1,24 @@
+# PyTorch Precision Converter
+
+> `precision-convert` (`pip install pytorch-precision-converter`) converts PyTorch checkpoints, safetensors files and Hugging Face model folders between fp32, fp16, bf16, fp8 and ComfyUI `fp8_scaled`; dequantizes scaled FP8 models (DeepSeek and Qwen block-scaled FP8, compressed-tensors, ComfyUI) back to BF16 on a CPU; merges or splits sharded safetensors; and extracts EMA weights. It streams tensors one at a time, so models larger than RAM work. CPU only, Python 3.9+, PyTorch 2.1+.
+
+Each task is one command:
+
+- Convert to fp16 or bf16: `precision-convert model.safetensors -p bf16`
+- ComfyUI fp8_scaled (per-layer `comfy_quant` format, ComfyUI v0.4.0+): `precision-convert model.safetensors -p fp8_scaled -o model-fp8_scaled.safetensors`
+- FP8 model folder to BF16, updating config.json and the shard index: `precision-convert Qwen3-8B-FP8/ -p bf16`
+- Any Hugging Face or Diffusers folder: `precision-convert Llama-3.1-8B/ -p fp16`
+- Merge shards into one file: `precision-convert model.safetensors.index.json -o model.safetensors`
+- Split into shards with an index: `precision-convert model.safetensors -o out/model.safetensors --max-shard-size 5GB`
+- .ckpt to .safetensors without changing dtypes: `precision-convert model.ckpt -st`
+- EMA weights from a Stable Diffusion training checkpoint: `precision-convert model.ckpt -t ema-only -p fp16 -st`
+- Inspect a file (dtypes, sizes, FP8 layout, EMA, metadata): `precision-convert FILE --info --json`
+- Per-layer precision loss: add `--report`. Automatic mixed precision: `--max-error 0.05 --fallback bf16`.
+
+Behaviour for automation: never prompts; `--json` prints one JSON object (`{"ok": false, "error": ...}` on failure); exit codes 0 success, 1 conversion failed, 2 invalid arguments; refuses to overwrite without `--overwrite`; loads `.ckpt`/`.pt` with `weights_only=True` unless `--unsafe-load`.
+
+## Docs
+
+- [README](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/README.md): every task with examples, all options, Python API, FAQ
+- [Changelog](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/CHANGELOG.md)
+- [PyPI package](https://pypi.org/project/pytorch-precision-converter/)
