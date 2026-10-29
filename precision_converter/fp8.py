@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from . import int8
 from .io import tensor_dtype, tensor_shape
 
 FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -42,11 +43,12 @@ CHUNK = 1 << 24  # elements per chunk for whole-tensor reductions, to bound temp
 class ScaledWeights:
     scales: dict[str, str] = field(default_factory=dict)  # weight key -> scale key
     stored_as_bytes: dict[str, torch.dtype] = field(default_factory=dict)  # FP8 weights saved as uint8
+    int8_groups: dict[str, int] = field(default_factory=dict)  # ComfyUI int8 weight -> ConvRot group size, 0: none
     extra: set[str] = field(default_factory=set)  # keys that only describe the quantization
 
 
 def find_scaled_weights(state_dict: Mapping) -> ScaledWeights:
-    """Find the FP8 weights that come with a scale, and the entries that describe them."""
+    """Find the FP8 and ComfyUI int8 weights that come with a scale, and the entries that describe them."""
     keys = set(state_dict)
     found = ScaledWeights()
     for key in keys:
@@ -65,6 +67,11 @@ def find_scaled_weights(state_dict: Mapping) -> ScaledWeights:
             if fp8 is not None:  # older files store FP8 weights as raw bytes
                 found.scales[key] = scale_key
                 found.stored_as_bytes[key] = fp8
+        elif dtype == torch.int8 and module + ".comfy_quant" in keys:
+            config = _comfy_config(state_dict[module + ".comfy_quant"])
+            if config.get("format") == int8.FORMAT:
+                found.scales[key] = scale_key
+                found.int8_groups[key] = int8.convrot_group_size(config)
 
     if found.scales:
         modules = {k[: -len(".weight")] for k in found.scales}
@@ -79,16 +86,21 @@ def find_scaled_weights(state_dict: Mapping) -> ScaledWeights:
         formats = sorted({_comfy_format(state_dict[k]) for k in unsupported})
         raise ValueError(
             f"{len(unsupported)} layers use ComfyUI quantization formats this tool can't dequantize yet: "
-            f"{', '.join(formats)}. Only float8_e4m3fn and float8_e5m2 are supported."
+            f"{', '.join(formats)}. Supported: float8_e4m3fn, float8_e5m2 and int8_tensorwise."
         )
     return found
 
 
-def _comfy_format(value: torch.Tensor) -> str:
+def _comfy_config(value: torch.Tensor) -> dict:
     try:
-        return str(json.loads(bytes(value.tolist()).decode("utf-8")).get("format"))
+        config = json.loads(bytes(value.tolist()).decode("utf-8"))
     except (ValueError, AttributeError):
-        return "unreadable"
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _comfy_format(value: torch.Tensor) -> str:
+    return str(_comfy_config(value).get("format", "unreadable"))
 
 
 def _block_size(weight_shape: list[int], scale_shape: list[int]) -> tuple[int, int] | None:

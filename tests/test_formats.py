@@ -5,7 +5,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-from precision_converter import convert_state_dict, open_checkpoint
+from precision_converter import convert_state_dict, int8, open_checkpoint
 from precision_converter.core import clean_metadata
 from precision_converter.fp8 import dequantize, find_scaled_weights, quantize_scaled
 from precision_converter.io import SafetensorsWriter, ShardedWriter, header_size_bound, parse_size
@@ -132,6 +132,63 @@ def test_quantize_scaled_to_416_like_comfy_org():
     assert scale.item() == pytest.approx(w.abs().max().item() / 416)
     with pytest.raises(ValueError, match="fp8_max"):
         quantize_scaled(w, fp8_max=500)
+
+
+# ComfyUI int8_convrot --------------------------------------------------------------------------
+
+
+def test_convrot_hadamard_is_its_own_inverse():
+    h = int8.hadamard(16)
+    assert torch.equal(h, h.T)
+    assert torch.allclose(h @ h, torch.eye(16), atol=1e-6)
+    block = torch.tensor([[1.0, 1, 1, -1], [1, 1, -1, 1], [1, -1, 1, 1], [-1, 1, 1, 1]])
+    assert torch.equal(h, torch.kron(block, block) / 4)  # Kronecker powers of ConvRot's 4x4 block
+    for size in (2, 8, 32):
+        with pytest.raises(ValueError, match="power of 4"):
+            int8.hadamard(size)
+
+
+def reference_convrot(w, group_size=256):
+    """comfy-kitchen's eager reference, written out: rotate in FP32, per-row scale amax/127, round half to even."""
+    h = int8.hadamard(group_size)
+    rotated = (w.float().reshape(w.shape[0], -1, group_size) @ h.T).reshape(w.shape)
+    scale = (rotated.abs().amax(dim=-1, keepdim=True) / 127.0).clamp(min=1e-30)
+    return (rotated / scale).round().clamp(-128, 127).to(torch.int8), scale
+
+
+def test_int8_convrot_matches_the_reference_in_chunks(monkeypatch):
+    w = small_weights(300, 1024).bfloat16()
+    q_ref, s_ref = reference_convrot(w)
+    monkeypatch.setattr(int8, "CHUNK", 7 * 1024)  # 7 rows per chunk, so the last chunk is partial
+    q, s = int8.quantize_convrot(w)
+    assert torch.equal(q, q_ref) and torch.equal(s, s_ref)
+    assert q.dtype == torch.int8 and s.dtype == torch.float32 and list(s.shape) == [300, 1]
+
+
+def test_int8_convrot_writes_comfyui_layout_and_round_trips():
+    sd = {"a.weight": small_weights(32, 512), "b.weight": small_weights(16, 100), "a.bias": torch.randn(32)}
+    out, report = convert_state_dict(sd, "int8_convrot", measure=True)
+    assert out["a.weight"].dtype == torch.int8 and list(out["a.weight_scale"].shape) == [32, 1]
+    assert bytes(out["a.comfy_quant"].tolist()) == b'{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}'
+    assert out["b.weight"].dtype == torch.float32 and report.not_quantized == ["b.weight"]  # 100 columns: no whole group
+    assert out["a.bias"].dtype == torch.float32
+    assert report.scaled == 1 and report.errors["a.weight"] < 0.02
+    back, back_report = convert_state_dict(out, "fp32")
+    assert back_report.dequantized == back_report.dequantized_int8 == 1
+    assert set(back) == {"a.weight", "a.bias", "b.weight"}
+    error = (back["a.weight"] - sd["a.weight"]).norm() / sd["a.weight"].norm()
+    assert error < 0.02
+
+
+def test_int8_without_convrot_and_unknown_formats():
+    q = torch.randint(-127, 128, (4, 8), dtype=torch.int8)
+    plain = {"x.weight": q, "x.weight_scale": torch.tensor(0.5),
+             "x.comfy_quant": torch.tensor(list(b'{"format": "int8_tensorwise"}'), dtype=torch.uint8)}
+    out, _ = convert_state_dict(plain, "fp32")
+    assert torch.equal(out["x.weight"], q.float() * 0.5)
+    plain["x.comfy_quant"] = torch.tensor(list(b'{"format": "nvfp4"}'), dtype=torch.uint8)
+    with pytest.raises(ValueError, match="nvfp4"):
+        convert_state_dict(plain, "fp32")
 
 
 def test_scaling_keeps_far_more_precision_than_a_plain_fp8_cast():

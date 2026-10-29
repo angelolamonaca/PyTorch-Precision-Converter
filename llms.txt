@@ -1,12 +1,13 @@
 # PyTorch Precision Converter
 
-> `precision-convert` (`pip install pytorch-precision-converter`) converts PyTorch checkpoints, safetensors files and Hugging Face model folders between fp32, fp16, bf16, fp8 and ComfyUI `fp8_scaled`; dequantizes scaled FP8 models (DeepSeek and Qwen block-scaled FP8, compressed-tensors, ComfyUI) back to BF16 on a CPU; merges or splits sharded safetensors; and extracts EMA weights. It streams tensors one at a time, so models larger than RAM work. CPU only, Python 3.9+, PyTorch 2.1+.
+> `precision-convert` (`pip install pytorch-precision-converter`) converts PyTorch checkpoints, safetensors files and Hugging Face model folders between fp32, fp16, bf16, fp8 and ComfyUI `fp8_scaled` and `int8_convrot`; dequantizes scaled FP8 and int8 models (DeepSeek and Qwen block-scaled FP8, compressed-tensors, ComfyUI fp8 and int8) back to BF16 on a CPU; merges or splits sharded safetensors; and extracts EMA weights. It streams tensors one at a time, so models larger than RAM work. CPU only, Python 3.9+, PyTorch 2.1+.
 
 Each task is one command:
 
 - Convert to fp16 or bf16: `precision-convert model.safetensors -p bf16`
 - ComfyUI fp8_scaled (per-layer `comfy_quant` format, ComfyUI v0.4.0+): `precision-convert model.safetensors -p fp8_scaled -o model-fp8_scaled.safetensors`
 - fp8_scaled of a fine-tune with the same layers as an official Comfy-Org release, renaming Hugging Face names to ComfyUI's: `precision-convert finetune/model.safetensors.index.json -p fp8_scaled --like https://huggingface.co/Comfy-Org/.../official_fp8_scaled.safetensors -o finetune_fp8_scaled.safetensors`
+- ComfyUI int8_convrot (rotated int8, per-row scales; ComfyUI v0.27.0+) with the same layers as an official Comfy-Org int8 file: `precision-convert finetune.safetensors -p int8_convrot --like https://huggingface.co/Comfy-Org/.../official_int8_convrot.safetensors`
 - FP8 model folder to BF16, updating config.json and the shard index: `precision-convert Qwen3-8B-FP8/ -p bf16`
 - Any Hugging Face or Diffusers folder: `precision-convert Llama-3.1-8B/ -p fp16`
 - Merge shards into one file: `precision-convert model.safetensors.index.json -o model.safetensors`

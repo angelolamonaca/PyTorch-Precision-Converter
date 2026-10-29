@@ -267,6 +267,27 @@ def test_like_reproduces_a_reference_made_from_the_same_model(tmp_path, capsys, 
     assert all(out[k].dtype == v.dtype and torch.equal(as_bytes(out[k]), as_bytes(v)) for k, v in official.items())
 
 
+def test_int8_convrot_like_a_reference(tmp_path, capsys):
+    from precision_converter import int8
+
+    base = {"a.weight": torch.randn(16, 512) * 0.02, "b.weight": torch.randn(8, 256) * 0.02,
+            "c.weight": torch.randn(8, 256) * 0.02, "norm.weight": torch.ones(16)}
+    official = {"norm.weight": base["norm.weight"], "c.weight": base["c.weight"]}  # c stays unquantized, like Comfy-Org's choice
+    for module in ("a", "b"):
+        q, scale = int8.quantize_convrot(base[module + ".weight"])
+        official.update({module + ".weight": q, module + ".weight_scale": scale, module + ".comfy_quant": int8.comfy_quant_entry()})
+    save_file(base, tmp_path / "base.safetensors")
+    save_file(official, tmp_path / "official.safetensors")
+    assert main([str(tmp_path / "base.safetensors"), "-p", "int8_convrot", "--like", str(tmp_path / "official.safetensors"),
+                 "-o", str(tmp_path / "out.safetensors")]) == 0
+    assert "Stored 2 weights as int8_convrot" in capsys.readouterr().out
+    out = load_file(tmp_path / "out.safetensors")
+    assert set(out) == set(official)
+    assert all(out[k].dtype == v.dtype and torch.equal(out[k], v) for k, v in official.items())
+    assert main([str(tmp_path / "out.safetensors"), "--info"]) == 0
+    assert "ComfyUI int8" in capsys.readouterr().out
+
+
 def test_explicit_rename(tmp_path):
     save_file({"model.language_model.w": torch.ones(2)}, tmp_path / "m.safetensors")
     assert main([str(tmp_path / "m.safetensors"), "--rename", "model.language_model.=model.", "-o", str(tmp_path / "o.safetensors")]) == 0
