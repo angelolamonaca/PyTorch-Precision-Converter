@@ -1,5 +1,6 @@
 # PyTorch Precision Converter
 
+[![PyPI](https://img.shields.io/pypi/v/pytorch-precision-converter)](https://pypi.org/project/pytorch-precision-converter/)
 [![Tests](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-orange)
@@ -37,10 +38,13 @@ A one-line cast quietly breaks things. This tool handles the details:
 ## Install
 
 ```bash
-pip install git+https://github.com/angelolamonaca/PyTorch-Precision-Converter
+pip install pytorch-precision-converter
 ```
 
-This installs the `precision-convert` command (`python -m precision_converter` works too). It needs Python 3.9+,
+For the latest unreleased changes, install from GitHub instead:
+`pip install git+https://github.com/angelolamonaca/PyTorch-Precision-Converter`.
+
+Either way you get the `precision-convert` command (`python -m precision_converter` works too). It needs Python 3.9+,
 PyTorch 2.1+ and `safetensors`.
 
 ## Usage
