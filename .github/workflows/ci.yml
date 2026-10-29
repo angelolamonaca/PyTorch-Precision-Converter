@@ -16,10 +16,10 @@ jobs:
           - python: "3.13"
           # Oldest versions the package supports.
           - python: "3.9"
-            pins: "torch==2.1.0 safetensors==0.4.3 numpy<2"
+            pins: "torch==2.1.0 safetensors==0.4.3 numpy==1.26.4"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install
