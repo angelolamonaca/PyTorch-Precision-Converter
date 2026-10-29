@@ -181,6 +181,13 @@ def reference_layers(header: Mapping[str, Mapping]) -> set[str]:
     return layers
 
 
+def reference_configs(header: Mapping[str, Mapping]) -> list[str]:
+    """The per-layer ComfyUI settings a reference file stores besides its weights: ``<module>.config``
+    uint8 JSON entries. Comfy-Org's int8 releases have ``comfy_attention.config`` entries holding
+    ``{"attention": "comfy_kitchen_int8"}``, which make ComfyUI run those layers' attention in int8."""
+    return sorted(key for key, entry in header.items() if key.endswith(".config") and entry.get("dtype") == "U8")
+
+
 def reference_fp8_max(header: Mapping[str, Mapping], read: Callable[[str], torch.Tensor]) -> float | None:
     """:data:`COMFY_ORG_FP8_MAX` if a reference file maps each layer's largest weight to 416, judged
     from its two smallest FP8 weights with a per-tensor scale; otherwise None, for the default 448.

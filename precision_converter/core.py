@@ -23,8 +23,8 @@ from .io import (
 )
 
 # Target precisions. "keep" leaves every tensor in the dtype it already has. "fp8_scaled" stores
-# Linear weights as FP8 with a per-tensor scale, and "int8_convrot" as rotated int8 with per-row
-# scales, both in ComfyUI's format.
+# Linear weights as FP8 with a per-tensor scale, "int8" as int8 with per-row scales, and
+# "int8_convrot" the same after a Hadamard rotation, all in ComfyUI's format.
 PRECISIONS: dict[str, torch.dtype | None] = {
     "keep": None,
     "fp32": torch.float32,
@@ -33,10 +33,13 @@ PRECISIONS: dict[str, torch.dtype | None] = {
     "fp8_e4m3fn": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
     "fp8_scaled": torch.float8_e4m3fn,
+    "int8": torch.int8,
     "int8_convrot": torch.int8,
 }
 # Precisions that store selected weights in a ComfyUI quantized layout and leave the other tensors alone.
-QUANTIZED_PRECISIONS = ("fp8_scaled", "int8_convrot")
+QUANTIZED_PRECISIONS = ("fp8_scaled", "int8", "int8_convrot")
+# The ConvRot group size of each int8 precision; 0 stores the weights unrotated.
+INT8_GROUP_SIZES = {"int8": 0, "int8_convrot": int8.GROUP_SIZE}
 
 CONVERSION_TYPES = ("full", "ema-only", "no-ema")
 
@@ -52,7 +55,7 @@ class ConversionReport:
     ema_swapped: int = 0  # weights replaced by their EMA copy
     dequantized: int = 0  # scaled FP8 and int8 weights expanded with their scales
     dequantized_int8: int = 0  # of which ComfyUI int8 weights
-    scaled: int = 0  # weights stored as scaled FP8 or int8_convrot
+    scaled: int = 0  # weights stored as scaled FP8 or int8
     not_quantized: list[str] = field(default_factory=list)  # selected weights whose shape the format can't store
     fallback: list[str] = field(default_factory=list)  # kept at the fallback precision because of max_error
     clamped: dict[str, int] = field(default_factory=dict)  # key -> number of values clamped into the target range
@@ -160,6 +163,7 @@ def iter_convert(
     report = report if report is not None else ConversionReport()
     dtype = PRECISIONS[precision]
     fallback_dtype = PRECISIONS[fallback]
+    group_size = INT8_GROUP_SIZES.get(precision, 0)
     keep_original = list(keep_original)
     measure = measure or max_error is not None
     # Scaled FP8 input only means something together with its scales, so expand it before any cast.
@@ -206,19 +210,19 @@ def iter_convert(
             if quantize_only is not None
             else fp8.is_quantizable(key, {key: value})
         )
-        if precision == "int8_convrot" and quantize and not int8.can_quantize(list(value.shape)):
+        if precision in INT8_GROUP_SIZES and quantize and not int8.can_quantize(list(value.shape), group_size):
             report.not_quantized.append(key)
             quantize = False
-        if precision == "int8_convrot" and quantize:
-            q, scale = int8.quantize_convrot(value)
-            error = int8.relative_error(value, q, scale, int8.GROUP_SIZE) if measure else None
+        if precision in INT8_GROUP_SIZES and quantize:
+            q, scale = int8.quantize(value, group_size)
+            error = int8.relative_error(value, q, scale, group_size) if measure else None
             if error is not None:
                 report.errors[key] = error
             if max_error is None or error <= max_error:
                 module = key[: -len(".weight")]
                 yield key, q
                 yield module + ".weight_scale", scale
-                yield module + ".comfy_quant", int8.comfy_quant_entry()
+                yield module + ".comfy_quant", int8.comfy_quant_entry(group_size)
                 report.converted += 1
                 report.scaled += 1
                 continue
@@ -288,10 +292,10 @@ def convert_state_dict(
 
     With ``measure``, the relative error of every converted tensor is recorded in the report.
     With ``max_error``, tensors whose error would exceed it are stored at ``fallback`` precision
-    instead ("keep" keeps their dtype). With ``fp8_scaled`` or ``int8_convrot``, ``quantize_only``
-    names the weights to quantize (for example from :func:`fp8.reference_layers`) instead of every
-    Linear weight. ``fp8_max`` is the FP8 value each weight's largest entry maps to with
-    ``fp8_scaled`` (default 448, FP8's maximum).
+    instead ("keep" keeps their dtype). With ``fp8_scaled``, ``int8`` or ``int8_convrot``,
+    ``quantize_only`` names the weights to quantize (for example from :func:`fp8.reference_layers`)
+    instead of every Linear weight. ``fp8_max`` is the FP8 value each weight's largest entry maps
+    to with ``fp8_scaled`` (default 448, FP8's maximum).
     """
     report = ConversionReport()
     converted = dict(
@@ -312,7 +316,7 @@ def output_size_bound(state_dict: Mapping, keys: Iterable[str], precision: str, 
         entries.append((key, shape))
         if precision in QUANTIZED_PRECISIONS and key.endswith(".weight") and len(shape) >= 2:
             module = key[: -len(".weight")]
-            scale_shape = [shape[0], 1] if precision == "int8_convrot" else []
+            scale_shape = [shape[0], 1] if precision in INT8_GROUP_SIZES else []
             entries += [(module + ".weight_scale", scale_shape), (module + ".comfy_quant", [80])]
     return header_size_bound(entries, metadata)
 

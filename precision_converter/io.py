@@ -303,15 +303,42 @@ def read_header(source: str | os.PathLike) -> dict[str, dict]:
 def read_tensor(source: str | os.PathLike, key: str) -> torch.Tensor:
     """One tensor of a local .safetensors file or shard index, or of an http(s) URL of a
     .safetensors file, read with range requests for the header and that tensor only."""
+    return read_tensors(source, [key])[key]
+
+
+def read_tensors(source: str | os.PathLike, keys: Iterable[str]) -> dict[str, torch.Tensor]:
+    """Several tensors of a local .safetensors file or shard index, or of an http(s) URL of a
+    .safetensors file. Over http(s) the header is read once, and tensors stored less than 1 MB
+    apart come in one range request."""
+    keys = list(keys)
     text = str(source)
     if not text.startswith(("http://", "https://")):
         path = Path(source)
-        return (ShardedSafetensors(path) if is_index_file(path) else SafetensorsFile(path))[key]
+        tensors = ShardedSafetensors(path) if is_index_file(path) else SafetensorsFile(path)
+        return {key: tensors[key] for key in keys}
     size = struct.unpack("<Q", _http_range(text, 0, 7))[0]
-    entry = json.loads(_http_range(text, 8, 7 + size))[key]
-    start, end = entry["data_offsets"]
-    data = bytearray(_http_range(text, 8 + size + start, 7 + size + end))
-    return torch.frombuffer(data, dtype=torch.uint8).view(DTYPES_BY_CODE[entry["dtype"]]).reshape(entry["shape"])
+    header = json.loads(_http_range(text, 8, 7 + size))
+    groups: list[list] = []  # [start, end, keys] of byte ranges to request
+    for key in sorted(keys, key=lambda k: header[k]["data_offsets"]):
+        start, end = header[key]["data_offsets"]
+        if groups and start - groups[-1][1] < 1 << 20:
+            groups[-1][1] = max(groups[-1][1], end)
+            groups[-1][2].append(key)
+        else:
+            groups.append([start, end, [key]])
+    out = {}
+    for first, last, group in groups:
+        data = _http_range(text, 8 + size + first, 7 + size + last) if last > first else b""
+        for key in group:
+            entry = header[key]
+            start, end = entry["data_offsets"]
+            dtype = DTYPES_BY_CODE[entry["dtype"]]
+            if end == start:
+                out[key] = torch.empty(entry["shape"], dtype=dtype)
+                continue
+            raw = bytearray(data[start - first : end - first])
+            out[key] = torch.frombuffer(raw, dtype=torch.uint8).view(dtype).reshape(entry["shape"])
+    return out
 
 
 def _http_range(url: str, start: int, end: int) -> bytes:
