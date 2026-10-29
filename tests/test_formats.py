@@ -134,7 +134,7 @@ def test_quantize_scaled_to_416_like_comfy_org():
         quantize_scaled(w, fp8_max=500)
 
 
-# ComfyUI int8_convrot --------------------------------------------------------------------------
+# ComfyUI int8 and int8_convrot -----------------------------------------------------------------
 
 
 def test_convrot_hadamard_is_its_own_inverse():
@@ -178,6 +178,43 @@ def test_int8_convrot_writes_comfyui_layout_and_round_trips():
     assert set(back) == {"a.weight", "a.bias", "b.weight"}
     error = (back["a.weight"] - sd["a.weight"]).norm() / sd["a.weight"].norm()
     assert error < 0.02
+
+
+def reference_rowwise(w):
+    """comfy-kitchen's quantize_int8_rowwise on the FP32 weight: per-row scale amax/127, round half to even."""
+    w = w.float()
+    scale = (w.abs().amax(dim=-1, keepdim=True) / 127.0).clamp(min=1e-30)
+    return (w / scale).round().clamp(-128, 127).to(torch.int8), scale
+
+
+def test_int8_matches_the_reference_and_leaves_the_input_alone(monkeypatch):
+    w = small_weights(300, 100)  # without ConvRot any column count works
+    original = w.clone()
+    monkeypatch.setattr(int8, "CHUNK", 7 * 100)  # 7 rows per chunk, so the last chunk is partial
+    for weight in (w, w.bfloat16()):
+        q_ref, s_ref = reference_rowwise(weight)
+        q, s = int8.quantize(weight)
+        assert torch.equal(q, q_ref) and torch.equal(s, s_ref)
+        assert q.dtype == torch.int8 and s.dtype == torch.float32 and list(s.shape) == [300, 1]
+    assert torch.equal(w, original)  # an FP32 weight is copied before dividing, not divided in place
+    with pytest.raises(ValueError, match="2-D"):
+        int8.quantize(torch.ones(2, 3, 4))
+
+
+def test_int8_writes_comfyui_layout_and_round_trips():
+    sd = {"a.weight": small_weights(32, 512), "b.weight": small_weights(16, 100), "a.bias": torch.randn(32),
+          "zero.weight": torch.zeros(8, 16)}
+    out, report = convert_state_dict(sd, "int8", measure=True)
+    assert all(out[k + ".weight"].dtype == torch.int8 for k in ("a", "b", "zero"))
+    assert list(out["b.weight_scale"].shape) == [16, 1] and report.not_quantized == []
+    assert bytes(out["a.comfy_quant"].tolist()) == b'{"format": "int8_tensorwise"}'
+    assert out["a.bias"].dtype == torch.float32
+    assert report.scaled == 3 and max(report.errors["a.weight"], report.errors["b.weight"]) < 0.02
+    back, back_report = convert_state_dict(out, "fp32")
+    assert back_report.dequantized == back_report.dequantized_int8 == 3
+    assert set(back) == set(sd) and torch.equal(back["zero.weight"], sd["zero.weight"])
+    for key in ("a.weight", "b.weight"):
+        assert (back[key] - sd[key]).norm() / sd[key].norm() < 0.02
 
 
 def test_int8_without_convrot_and_unknown_formats():

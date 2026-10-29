@@ -1,11 +1,11 @@
 """ComfyUI's INT8 format (``int8_tensorwise``), with or without ConvRot.
 
 A weight ``[out, in]`` is stored as ``<m>.weight`` int8, ``<m>.weight_scale`` FP32 (one scale per output row,
-``[out, 1]``, or a scalar) and ``<m>.comfy_quant`` holding
-``{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}`` as UTF-8 bytes. With ConvRot, the
-weight is first rotated by a normalized Hadamard matrix in groups of ``convrot_groupsize`` input features; ComfyUI
-rotates the activations the same way at run time, so the product is unchanged while outliers are spread over each
-group. Spec: https://github.com/Comfy-Org/ComfyUI/blob/master/QUANTIZATION.md
+``[out, 1]``, or a scalar) and ``<m>.comfy_quant`` holding ``{"format": "int8_tensorwise"}`` as UTF-8 bytes, plus
+``"convrot": true, "convrot_groupsize": 256`` with ConvRot. With ConvRot, the weight is first rotated by a
+normalized Hadamard matrix in groups of ``convrot_groupsize`` input features; ComfyUI rotates the activations the
+same way at run time, so the product is unchanged while outliers are spread over each group. Spec:
+https://github.com/Comfy-Org/ComfyUI/blob/master/QUANTIZATION.md
 
 Rotation and rounding follow comfy-kitchen's reference implementation in FP32, so converting the bf16 file
 Comfy-Org released gives back the int8 values of their int8_convrot file.
@@ -49,25 +49,33 @@ def rotate(weight: torch.Tensor, group_size: int = GROUP_SIZE) -> torch.Tensor:
 
 
 def can_quantize(shape: list[int] | tuple[int, ...] | None, group_size: int = GROUP_SIZE) -> bool:
-    """Whether a weight of this shape can be stored as int8_convrot: 2-D, with a whole number of groups."""
-    return shape is not None and len(shape) == 2 and shape[1] % group_size == 0
+    """Whether a weight of this shape can be stored as int8: 2-D and, with ConvRot (``group_size`` > 0), with a
+    whole number of groups."""
+    return shape is not None and len(shape) == 2 and (not group_size or shape[1] % group_size == 0)
 
 
-def quantize_convrot(t: torch.Tensor, group_size: int = GROUP_SIZE) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rotate a 2-D weight and quantize it to int8 with one FP32 scale per row. Returns the int8 tensor and
-    the ``[rows, 1]`` scales."""
+def quantize(t: torch.Tensor, group_size: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2-D weight to int8 with one FP32 scale per row, rotating it first when ``group_size`` > 0
+    (ConvRot). Returns the int8 tensor and the ``[rows, 1]`` scales."""
     if not can_quantize(list(t.shape), group_size):
-        raise ValueError(f"int8_convrot needs a 2-D weight with columns divisible by {group_size}, got {list(t.shape)}")
+        need = f"a 2-D weight with columns divisible by {group_size}" if group_size else "a 2-D weight"
+        raise ValueError(f"int8 needs {need}, got {list(t.shape)}")
     rows, cols = t.shape
     q = torch.empty((rows, cols), dtype=torch.int8)
     scale = torch.empty((rows, 1), dtype=torch.float32)
-    step = max(1, CHUNK // cols)
+    step = max(1, CHUNK // max(1, cols))
     for start in range(0, rows, step):
-        rotated = rotate(t[start : start + step], group_size)
-        s = (rotated.abs().amax(dim=-1, keepdim=True) / 127.0).clamp_(min=1e-30)
-        q[start : start + step] = rotated.div_(s).round_().clamp_(-128, 127).to(torch.int8)
+        chunk = t[start : start + step]
+        values = rotate(chunk, group_size) if group_size else chunk.to(torch.float32, copy=True)
+        s = (values.abs().amax(dim=-1, keepdim=True) / 127.0).clamp_(min=1e-30)
+        q[start : start + step] = values.div_(s).round_().clamp_(-128, 127).to(torch.int8)
         scale[start : start + step] = s
     return q, scale
+
+
+def quantize_convrot(t: torch.Tensor, group_size: int = GROUP_SIZE) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate a 2-D weight and quantize it to int8 with one FP32 scale per row: :func:`quantize` with ConvRot."""
+    return quantize(t, group_size)
 
 
 def dequantize(q: torch.Tensor, scale: torch.Tensor, group_size: int = 0) -> torch.Tensor:
@@ -99,9 +107,11 @@ def relative_error(original: torch.Tensor, q: torch.Tensor, scale: torch.Tensor,
 
 
 def comfy_quant_entry(group_size: int = GROUP_SIZE) -> torch.Tensor:
-    """The ``<module>.comfy_quant`` tensor marking a layer as int8_convrot for ComfyUI."""
-    config = json.dumps({"format": FORMAT, "convrot": True, "convrot_groupsize": group_size})
-    return torch.tensor(list(config.encode("utf-8")), dtype=torch.uint8)
+    """The ``<module>.comfy_quant`` tensor marking a layer as ComfyUI int8, with ConvRot when ``group_size`` > 0."""
+    config: dict[str, object] = {"format": FORMAT}
+    if group_size:
+        config.update(convrot=True, convrot_groupsize=group_size)
+    return torch.tensor(list(json.dumps(config).encode("utf-8")), dtype=torch.uint8)
 
 
 def convrot_group_size(config: dict) -> int:

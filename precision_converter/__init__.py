@@ -1,6 +1,6 @@
 """Convert the tensor precision of PyTorch checkpoints and safetensors files."""
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 from .core import (  # noqa: E402
     CONVERSION_TYPES,
@@ -15,7 +15,7 @@ from .core import (  # noqa: E402
 )
 from .folder import FolderReport, convert_folder  # noqa: E402
 from .fp8 import dequantize, quantize_scaled  # noqa: E402
-from .int8 import quantize_convrot  # noqa: E402
+from .int8 import quantize as quantize_int8, quantize_convrot  # noqa: E402
 from .io import (  # noqa: E402
     Checkpoint,
     SafetensorsFile,
@@ -43,6 +43,7 @@ __all__ = [
     "load_checkpoint",
     "open_checkpoint",
     "quantize_convrot",
+    "quantize_int8",
     "quantize_scaled",
     "save_checkpoint",
     "write_safetensors",

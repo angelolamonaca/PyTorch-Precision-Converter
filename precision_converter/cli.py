@@ -51,6 +51,8 @@ examples:
                                                                same layers as an official fp8_scaled release
   precision-convert finetune.safetensors -p int8_convrot --like https://huggingface.co/.../official_int8_convrot.safetensors
                                                                ComfyUI int8_convrot, same layers as the official file
+  precision-convert finetune.safetensors -p int8 --like https://huggingface.co/.../official_int8_convrot.safetensors
+                                                               the same layers as int8 without the rotation
   precision-convert DeepSeek-V3/ -p bf16                       FP8 Hugging Face model folder -> BF16, on CPU
   precision-convert model.safetensors.index.json -o model.safetensors       merge shards into one file
   precision-convert model.safetensors -o out/model.safetensors --max-shard-size 5GB   split into shards
@@ -68,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="precision-convert",
         description="Convert PyTorch checkpoints, safetensors files and Hugging Face model folders to "
-        "fp32, fp16, bf16, fp8 or ComfyUI's fp8_scaled and int8_convrot; extract EMA weights; dequantize scaled "
+        "fp32, fp16, bf16, fp8 or ComfyUI's fp8_scaled, int8 and int8_convrot; extract EMA weights; dequantize scaled "
         "FP8 and int8; merge or split shards.",
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -86,8 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="keep",
         choices=PRECISIONS,
         help="Target precision for floating-point tensors (default: keep, which changes no dtype). fp8_scaled "
-        "stores Linear weights as fp8_e4m3fn with a per-tensor scale, and int8_convrot as Hadamard-rotated int8 "
-        "with per-row scales, both in ComfyUI's format.",
+        "stores Linear weights as fp8_e4m3fn with a per-tensor scale, int8 as int8 with per-row scales, and "
+        "int8_convrot as Hadamard-rotated int8 with per-row scales, all in ComfyUI's format.",
     )
     parser.add_argument(
         "-t",
@@ -128,13 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--fallback",
         default="keep",
         choices=[p for p in PRECISIONS if p not in QUANTIZED_PRECISIONS],
-        help="Precision for tensors rejected by --max-error and, with fp8_scaled or int8_convrot, for tensors "
-        "that can't be stored quantized (norms, biases, convolutions). Default: keep their dtype.",
+        help="Precision for tensors rejected by --max-error and, with fp8_scaled, int8 or int8_convrot, for "
+        "tensors that can't be stored quantized (norms, biases, convolutions). Default: keep their dtype.",
     )
     parser.add_argument(
         "--like",
         metavar="REFERENCE",
-        help="With fp8_scaled or int8_convrot: quantize exactly the layers that this quantized file quantizes, "
+        help="With fp8_scaled, int8 or int8_convrot: quantize exactly the layers that this quantized file quantizes, "
         "e.g. Comfy-Org's official fp8_scaled or int8 file of the same model (with fp8_scaled, also scale them the "
         "way it does). A local path or an https URL; only the header and two small layers are read.",
     )
@@ -236,15 +238,16 @@ def summarize(report: ConversionReport, args: argparse.Namespace, console: Conso
         console.say(f"Dequantized {plural(fp8_dequantized, 'scaled FP8 weight')}")
     if report.dequantized_int8:
         console.say(f"Dequantized {plural(report.dequantized_int8, 'int8 weight')}")
-    if report.scaled and args.precision == "int8_convrot":
-        # ComfyUI v0.27.0 added int8_convrot Linear layers, v0.30.0 int8_convrot embeddings.
+    if report.scaled and args.precision in ("int8", "int8_convrot"):
+        # ComfyUI v0.27.0 added int8 Linear layers (with or without ConvRot), v0.30.0 int8 embeddings.
         version = "v0.30.0" if getattr(args, "int8_embeddings", False) else "v0.27.0"
-        console.say(f"Stored {plural(report.scaled, 'weight')} as int8_convrot (ComfyUI format, needs ComfyUI {version}+)")
+        console.say(f"Stored {plural(report.scaled, 'weight')} as {args.precision} (ComfyUI format, needs ComfyUI {version}+)")
     elif report.scaled:
         console.say(f"Stored {plural(report.scaled, 'weight')} as scaled FP8 (ComfyUI format, needs ComfyUI v0.4.0+)")
     if report.not_quantized:
-        console.warn(f"{plural(len(report.not_quantized), 'weight')} kept unquantized: int8_convrot needs a column count "
-                     f"divisible by 256 (e.g. {report.not_quantized[0]})")
+        need = "a column count divisible by 256" if args.precision == "int8_convrot" else "2-D weights"
+        console.warn(f"{plural(len(report.not_quantized), 'weight')} kept unquantized: {args.precision} needs {need} "
+                     f"(e.g. {report.not_quantized[0]})")
     if args.type == "ema-only":
         if report.ema_swapped:
             console.say(f"Used the EMA weights for {plural(report.ema_swapped, 'tensor')}")
@@ -392,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     reference = None
     if args.like:
         if args.precision not in QUANTIZED_PRECISIONS:
-            parser.error("--like only works with -p fp8_scaled or -p int8_convrot")
+            parser.error("--like only works with -p fp8_scaled, -p int8 or -p int8_convrot")
         try:
             reference = read_header(args.like)
             args.like_layers = reference_layers(reference)
@@ -436,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     as_safetensors = output_path.suffix == ".safetensors"
     if max_shard_bytes and not as_safetensors:
         parser.error("--max-shard-size needs safetensors output")
-    if args.precision in ("fp8_scaled", "fp8_e4m3fn", "fp8_e5m2", "int8_convrot") and not as_safetensors:
+    if args.precision in ("fp8_scaled", "fp8_e4m3fn", "fp8_e5m2", "int8", "int8_convrot") and not as_safetensors:
         console.warn("quantized weights in a PyTorch pickle are unusual; ComfyUI expects them as .safetensors")
     if any(output_path.resolve() == s.resolve() for s in sources):
         parser.error("the output would replace the input file; choose another --output")
