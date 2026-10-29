@@ -125,6 +125,15 @@ def test_fp8_scaled_fallback_precision_for_other_tensors():
     assert out["a.bias"].dtype == torch.bfloat16
 
 
+def test_quantize_scaled_to_416_like_comfy_org():
+    w = small_weights(32, 16)
+    q, scale = quantize_scaled(w, fp8_max=416)
+    assert q.float().abs().max().item() == 416.0
+    assert scale.item() == pytest.approx(w.abs().max().item() / 416)
+    with pytest.raises(ValueError, match="fp8_max"):
+        quantize_scaled(w, fp8_max=500)
+
+
 def test_scaling_keeps_far_more_precision_than_a_plain_fp8_cast():
     # Weights this small sit below e4m3fn's smallest normal number (2^-6) when cast directly.
     sd = {"layer.weight": torch.randn(256, 256) * 0.002}
@@ -281,16 +290,36 @@ def test_quantize_only_follows_the_reference():
     assert report.scaled == 2
 
 
-def test_read_header_over_http(tmp_path, monkeypatch):
-    """Only the header is fetched, with range requests, even for a large remote file."""
+def test_reference_fp8_max_finds_comfy_orgs_416(tmp_path):
+    from precision_converter.fp8 import COMFY_ORG_FP8_MAX, reference_fp8_max
+    from precision_converter.io import read_header, read_tensor
+
+    def fp8_max_of(path, sd):
+        write(path, sd)
+        return reference_fp8_max(read_header(path), lambda key: read_tensor(path, key))
+
+    def reference(fp8_max, scale_suffix=".weight_scale"):
+        sd = {}
+        for name in ("a", "b", "c"):
+            q, scale = quantize_scaled(small_weights(8, 8), fp8_max=fp8_max)
+            sd.update({f"{name}.weight": q, f"{name}{scale_suffix}": scale})
+        return sd
+
+    assert fp8_max_of(tmp_path / "te.safetensors", reference(COMFY_ORG_FP8_MAX)) == COMFY_ORG_FP8_MAX
+    assert fp8_max_of(tmp_path / "legacy.safetensors", reference(COMFY_ORG_FP8_MAX, ".scale_weight")) == COMFY_ORG_FP8_MAX
+    assert fp8_max_of(tmp_path / "dit.safetensors", reference(None)) is None  # 448, the default
+    int8 = {"a.weight": torch.ones(8, 8, dtype=torch.int8), "a.weight_scale": torch.ones(8, 1)}
+    assert fp8_max_of(tmp_path / "int8.safetensors", int8) is None
+
+
+@pytest.fixture
+def http_files(monkeypatch):
+    """Serve bytes at fake URLs through urllib, answering range requests. Returns the files to serve
+    (url -> bytes) and the list of response sizes."""
     import io as stdlib_io
     import urllib.request
 
-    from precision_converter.io import read_header
-
-    write(tmp_path / "remote.safetensors", {"w": torch.zeros(1000, 1000)})
-    data = (tmp_path / "remote.safetensors").read_bytes()
-    requested = []
+    files, sent = {}, []
 
     class Response(stdlib_io.BytesIO):
         status = 206
@@ -303,12 +332,35 @@ def test_read_header_over_http(tmp_path, monkeypatch):
 
     def fake_urlopen(request, timeout=None):
         start, end = map(int, request.headers["Range"].removeprefix("bytes=").split("-"))
-        requested.append(end - start + 1)
-        return Response(data[start : end + 1])
+        sent.append(end - start + 1)
+        return Response(files[request.full_url][start : end + 1])
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return files, sent
+
+
+def test_read_header_over_http(tmp_path, http_files):
+    """Only the header is fetched, with range requests, even for a large remote file."""
+    from precision_converter.io import read_header
+
+    files, sent = http_files
+    write(tmp_path / "remote.safetensors", {"w": torch.zeros(1000, 1000)})
+    files["https://example.com/remote.safetensors"] = (tmp_path / "remote.safetensors").read_bytes()
     assert read_header("https://example.com/remote.safetensors")["w"]["shape"] == [1000, 1000]
-    assert sum(requested) < 1000  # never the 4 MB of tensor data
+    assert sum(sent) < 1000  # never the 4 MB of tensor data
+
+
+def test_read_tensor_over_http(tmp_path, http_files):
+    """One small tensor is fetched without the large ones."""
+    from precision_converter.io import read_tensor
+
+    files, sent = http_files
+    small = torch.randn(4, 8).to(torch.float8_e4m3fn)
+    write(tmp_path / "remote.safetensors", {"big": torch.zeros(1000, 1000), "small": small})
+    files["https://example.com/remote.safetensors"] = (tmp_path / "remote.safetensors").read_bytes()
+    got = read_tensor("https://example.com/remote.safetensors", "small")
+    assert got.dtype == torch.float8_e4m3fn and torch.equal(got.view(torch.uint8), small.view(torch.uint8))
+    assert sum(sent) < 1000
 
 
 def test_renamed_mapping_and_inference():

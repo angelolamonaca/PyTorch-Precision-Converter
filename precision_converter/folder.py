@@ -50,6 +50,7 @@ def convert_folder(
     measure: bool = False,
     skip_files: Iterable[str] = (),
     quantize_only: Collection[str] | None = None,
+    fp8_max: float | None = None,
     unsafe: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> FolderReport:
@@ -96,7 +97,7 @@ def convert_folder(
         options = dict(
             precision=precision, conversion=conversion, keep_original=keep_original,
             max_error=max_error, fallback=fallback, measure=measure, quantize_only=quantize_only,
-            report=result.report,
+            fp8_max=fp8_max, report=result.report,
         )
         if path.suffix == ".safetensors":
             own = open_checkpoint(path)

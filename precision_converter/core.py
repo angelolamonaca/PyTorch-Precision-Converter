@@ -136,6 +136,7 @@ def iter_convert(
     measure: bool = False,
     keys: Iterable[str] | None = None,
     quantize_only: Collection[str] | None = None,
+    fp8_max: float | None = None,
     report: ConversionReport | None = None,
 ) -> Iterator[tuple[str, object]]:
     """Yield the converted entries of a state dict one at a time.
@@ -195,7 +196,7 @@ def iter_convert(
             else fp8.is_quantizable(key, {key: value})
         )
         if precision == "fp8_scaled" and quantize:
-            q, scale = fp8.quantize_scaled(value, dtype)
+            q, scale = fp8.quantize_scaled(value, dtype, fp8_max)
             error = fp8.relative_error(value, _restored(q, scale)) if measure else None
             if error is not None:
                 report.errors[key] = error
@@ -246,6 +247,7 @@ def convert_state_dict(
     fallback: str = "keep",
     measure: bool = False,
     quantize_only: Collection[str] | None = None,
+    fp8_max: float | None = None,
 ) -> tuple[dict[str, object], ConversionReport]:
     """Convert the floating-point tensors of a state dict to ``precision``.
 
@@ -257,13 +259,15 @@ def convert_state_dict(
     With ``measure``, the relative error of every converted tensor is recorded in the report.
     With ``max_error``, tensors whose error would exceed it are stored at ``fallback`` precision
     instead ("keep" keeps their dtype). With ``fp8_scaled``, ``quantize_only`` names the weights to
-    quantize (for example from :func:`fp8.reference_layers`) instead of every Linear weight.
+    quantize (for example from :func:`fp8.reference_layers`) instead of every Linear weight, and
+    ``fp8_max`` is the FP8 value each weight's largest entry maps to (default 448, FP8's maximum).
     """
     report = ConversionReport()
     converted = dict(
         iter_convert(
             state_dict, precision, conversion, keep_original,
-            max_error=max_error, fallback=fallback, measure=measure, quantize_only=quantize_only, report=report,
+            max_error=max_error, fallback=fallback, measure=measure, quantize_only=quantize_only,
+            fp8_max=fp8_max, report=report,
         )
     )
     return converted, report

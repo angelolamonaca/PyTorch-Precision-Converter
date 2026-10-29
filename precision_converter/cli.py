@@ -24,7 +24,7 @@ from .core import (
     write_safetensors,
 )
 from .folder import convert_folder
-from .fp8 import reference_layers
+from .fp8 import reference_fp8_max, reference_layers
 from .io import (
     RenamedMapping,
     ShardedSafetensors,
@@ -34,10 +34,12 @@ from .io import (
     open_checkpoint,
     parse_size,
     read_header,
+    read_tensor,
 )
 
 REPO_URL = "https://github.com/angelolamonaca/PyTorch-Precision-Converter"
 STAR_LINE = f"⭐ If precision-convert saved you time, a GitHub star helps others find it: {REPO_URL}"
+FP8_MAX_LINE = "Scaling like the reference: each layer's largest weight becomes {:g} in FP8, not 448"
 
 EXAMPLES = f"""\
 examples:
@@ -128,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--like",
         metavar="REFERENCE",
         help="With fp8_scaled: quantize exactly the layers that this quantized file quantizes, e.g. Comfy-Org's "
-        "official fp8_scaled or int8 file of the same model. A local path or an https URL; only the header is read.",
+        "official fp8_scaled or int8 file of the same model, and scale them the way it does. A local path or an "
+        "https URL; only the header and two small layers are read.",
     )
     parser.add_argument(
         "--rename",
@@ -314,12 +317,14 @@ def run_folder(args: argparse.Namespace, parser: argparse.ArgumentParser, input_
     output = Path(args.output) if args.output else default_folder_output(input_path, args.type, args.precision)
     if output.exists() and not args.overwrite:
         parser.error(f"{output} already exists; pass --overwrite to replace it")
+    if args.fp8_max:
+        console.say(FP8_MAX_LINE.format(args.fp8_max))
     try:
         result = convert_folder(
             input_path, output, precision=args.precision, conversion=args.type,
             keep_original=args.keep_original, max_error=args.max_error, fallback=args.fallback,
-            measure=args.report, skip_files=args.skip_files, quantize_only=args.like_layers, unsafe=args.unsafe_load,
-            progress=lambda name: console.say(f"Converting {name}"),
+            measure=args.report, skip_files=args.skip_files, quantize_only=args.like_layers, fp8_max=args.fp8_max,
+            unsafe=args.unsafe_load, progress=lambda name: console.say(f"Converting {name}"),
         )
     except (UnsafeCheckpointError, ValueError, OSError, RuntimeError) as e:
         return console.error(str(e))
@@ -367,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--rename takes OLD=NEW, got {rule!r}")
         renames[old] = new
     args.like_layers = None
+    args.fp8_max = None
     reference = None
     if args.like:
         if args.precision != "fp8_scaled":
@@ -378,6 +384,10 @@ def main(argv: list[str] | None = None) -> int:
             return console.error(f"can't read the header of {args.like}: {e}")
         if not args.like_layers:
             return console.error(f"{args.like} has no quantized layers to copy")
+        try:
+            args.fp8_max = reference_fp8_max(reference, lambda key: read_tensor(args.like, key))
+        except (OSError, ValueError, KeyError) as e:
+            console.warn(f"can't read a layer of {args.like} ({e}); FP8 weights get the default scaling")
     if input_path.is_dir():
         if renames:
             parser.error("--rename works on files, not folders")
@@ -436,6 +446,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         missing = len(args.like_layers) - len(found)
         console.say(f"Copying the layer choice of {args.like}: {plural(len(found), 'layer')} to quantize")
+        if args.fp8_max:
+            console.say(FP8_MAX_LINE.format(args.fp8_max))
         if missing:
             console.warn(f"{plural(missing, 'layer')} quantized in the reference {'is' if missing == 1 else 'are'} not in the input")
 
@@ -444,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     entries = iter_convert(
         checkpoint.tensors, args.precision, args.type, args.keep_original,
         max_error=args.max_error, fallback=args.fallback, measure=args.report,
-        quantize_only=args.like_layers, report=report,
+        quantize_only=args.like_layers, fp8_max=args.fp8_max, report=report,
     )
     try:
         if as_safetensors:

@@ -61,7 +61,14 @@ It also handles the details a quick script gets wrong:
 | [Qwen/Qwen3-0.6B-FP8](https://huggingface.co/Qwen/Qwen3-0.6B-FP8) (block-scaled FP8) | folder → bf16 | Same tensors as the official BF16 release; 115 bit-identical, 196 within 2.66% |
 | [RedHatAI/Qwen3-0.6B-FP8-dynamic](https://huggingface.co/RedHatAI/Qwen3-0.6B-FP8-dynamic) (compressed-tensors) | folder → bf16 | Same tensors as the official BF16 release; 115 bit-identical, 196 within 2.60% |
 | [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) | → `fp8_scaled` | 1.50 GB → 0.91 GB, 2.65% mean error, embeddings kept in bf16 |
+| [Gemma 4 E4B](https://huggingface.co/Comfy-Org/gemma-4) text encoder, Comfy-Org's bf16 | → `fp8_scaled`, `--like` the official fp8_scaled | Every weight and scale bit-identical to the official file; 16.02 GB → 9.06 GB in 56 s, 4.1 GB peak memory |
+| [Qwen3-VL 8B](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) text encoder, Comfy-Org's bf16 | → `fp8_scaled`, `--like` the official fp8_scaled ([Boogu-Image](https://huggingface.co/Comfy-Org/Boogu-Image)) | Unquantized tensors and 99.95% of FP8 bytes bit-identical to the official file, the rest rounding ties; 17.53 GB → 10.59 GB in 46 s |
+| [Qwen-Image 2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1), Comfy-Org's bf16 | → `fp8_scaled`, `--like` the int8 release | The int8 release's 192 layers in FP8, 2.65% mean error; 14.23 GB → 7.25 GB in 33 s, 0.77 GB peak memory |
+| [Llama-3.1-8B-Lexi-Uncensored-V2](https://huggingface.co/Orenguteng/Llama-3.1-8B-Lexi-Uncensored-V2), 4 shards | → one `fp8_scaled` file, `--like` Comfy-Org's Llama 3.1 8B | Same 291 tensors, dtypes and shapes as the official file; 16.06 GB → 9.08 GB in 48 s, 0.81 GB peak memory |
+| [Huihui-Qwen3-VL-8B-Instruct-abliterated](https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated), 4 shards | → one `fp8_scaled` file, `--like` Comfy-Org's Qwen3-VL 8B | Renamed to ComfyUI's names; same 1,254 tensors, dtypes and shapes as the official file; 17.53 GB → 10.59 GB in 45 s |
 | Comfy-Org `fp8_scaled` releases (Krea-2, Flux Krea) | header inspection | Uses the three layouts this tool reads and writes; tests cover each one |
+
+Times and peak memory footprint measured with `/usr/bin/time -l` on an Apple M3 Pro CPU with 18 GB of RAM.
 
 ## How to
 
@@ -103,15 +110,19 @@ precision-convert gemma4_e4b_uncensored.safetensors -p fp8_scaled \
   --like https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e4b_it_fp8_scaled.safetensors
 ```
 
-`--like` takes a local file or a URL and reads only the header, so nothing big is downloaded. The reference can be
-fp8_scaled, int8 or plain fp8; its quantized layers become fp8_scaled in the output. When names differ only by a
-prefix, such as Hugging Face's `model.language_model.*` against ComfyUI's `model.*`, they are renamed to the
-reference's (`--rename OLD=NEW` does the same by hand). A shard index works as input, so a Hugging Face fine-tune
-becomes one ComfyUI file:
+`--like` takes a local file or a URL and reads only the header and two small layers, so nothing big is downloaded.
+The reference can be fp8_scaled, int8 or plain fp8; its quantized layers become fp8_scaled in the output, scaled
+the way the reference scales them (most Comfy-Org text encoders map each layer's largest weight to 416 instead of
+FP8's maximum, 448). Converting Comfy-Org's own bf16 Gemma 4 E4B this way gives back their fp8_scaled file: every
+weight and scale comes out [bit-identical](#tested-on-real-models).
+
+When names differ only by a prefix, such as Hugging Face's `model.language_model.*` against ComfyUI's `model.*`,
+they are renamed to the reference's (`--rename OLD=NEW` does the same by hand). A shard index works as input, so a
+Hugging Face fine-tune becomes one ComfyUI file:
 
 ```bash
 precision-convert Huihui-Qwen3-VL-8B-Instruct-abliterated/model.safetensors.index.json -p fp8_scaled \
-  --like https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
+  --like https://huggingface.co/Comfy-Org/Boogu-Image/resolve/main/text_encoders/qwen3vl_8b_fp8_scaled.safetensors \
   -o qwen3vl_8b_abliterated_fp8_scaled.safetensors
 ```
 

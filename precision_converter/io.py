@@ -300,6 +300,20 @@ def read_header(source: str | os.PathLike) -> dict[str, dict]:
     return header
 
 
+def read_tensor(source: str | os.PathLike, key: str) -> torch.Tensor:
+    """One tensor of a local .safetensors file or shard index, or of an http(s) URL of a
+    .safetensors file, read with range requests for the header and that tensor only."""
+    text = str(source)
+    if not text.startswith(("http://", "https://")):
+        path = Path(source)
+        return (ShardedSafetensors(path) if is_index_file(path) else SafetensorsFile(path))[key]
+    size = struct.unpack("<Q", _http_range(text, 0, 7))[0]
+    entry = json.loads(_http_range(text, 8, 7 + size))[key]
+    start, end = entry["data_offsets"]
+    data = bytearray(_http_range(text, 8 + size + start, 7 + size + end))
+    return torch.frombuffer(data, dtype=torch.uint8).view(DTYPES_BY_CODE[entry["dtype"]]).reshape(entry["shape"])
+
+
 def _http_range(url: str, start: int, end: int) -> bytes:
     request = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}", "User-Agent": "precision-convert"})
     with urllib.request.urlopen(request, timeout=60) as response:

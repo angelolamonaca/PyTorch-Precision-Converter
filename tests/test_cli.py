@@ -246,6 +246,27 @@ def test_like_renames_to_the_reference_layout(tmp_path, capsys):
         "model.layers.0.q.weight", "model.layers.0.q.weight_scale", "model.layers.0.q.comfy_quant", "model.norm.weight"}
 
 
+@pytest.mark.parametrize("fp8_max", [416.0, None])
+def test_like_reproduces_a_reference_made_from_the_same_model(tmp_path, capsys, fp8_max):
+    from precision_converter.fp8 import comfy_quant_entry, quantize_scaled
+
+    base = {"a.weight": torch.randn(16, 16) * 0.02, "b.weight": torch.randn(8, 16) * 0.02, "norm.weight": torch.ones(16)}
+    official = {"norm.weight": base["norm.weight"]}
+    for module in ("a", "b"):
+        q, scale = quantize_scaled(base[module + ".weight"], fp8_max=fp8_max)
+        official.update({module + ".weight": q, module + ".weight_scale": scale,
+                         module + ".comfy_quant": comfy_quant_entry(torch.float8_e4m3fn)})
+    save_file(base, tmp_path / "base.safetensors")
+    save_file(official, tmp_path / "official.safetensors")
+    assert main([str(tmp_path / "base.safetensors"), "-p", "fp8_scaled", "--like", str(tmp_path / "official.safetensors"),
+                 "-o", str(tmp_path / "out.safetensors")]) == 0
+    assert ("becomes 416 in FP8" in capsys.readouterr().out) == (fp8_max is not None)
+    out = load_file(tmp_path / "out.safetensors")
+    as_bytes = lambda t: t.reshape(-1).view(torch.uint8)
+    assert set(out) == set(official)
+    assert all(out[k].dtype == v.dtype and torch.equal(as_bytes(out[k]), as_bytes(v)) for k, v in official.items())
+
+
 def test_explicit_rename(tmp_path):
     save_file({"model.language_model.w": torch.ones(2)}, tmp_path / "m.safetensors")
     assert main([str(tmp_path / "m.safetensors"), "--rename", "model.language_model.=model.", "-o", str(tmp_path / "o.safetensors")]) == 0

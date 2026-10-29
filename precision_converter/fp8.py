@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -29,6 +29,11 @@ SCALE_SUFFIXES = (".weight_scale_inv", ".weight_scale", ".scale_weight")
 QUANT_EXTRA_SUFFIXES = (".comfy_quant", ".input_scale", ".scale_input")
 LEGACY_MARKER = "scaled_fp8"
 COMFY_FORMATS = {torch.float8_e4m3fn: "float8_e4m3fn", torch.float8_e5m2: "float8_e5m2"}
+# Most of Comfy-Org's fp8_scaled text encoders (Gemma 4, Qwen3-VL, Llama 3.1, T5) map each layer's
+# largest weight to 416 instead of FP8's maximum of 448, which ComfyUI itself and many of their
+# diffusion models use. The accuracy is the same either way; copying it lets a conversion of the
+# same bf16 file match their file byte for byte.
+COMFY_ORG_FP8_MAX = 416.0
 
 CHUNK = 1 << 24  # elements per chunk for whole-tensor reductions, to bound temporary memory
 
@@ -127,12 +132,17 @@ def abs_max(t: torch.Tensor) -> float:
     return best
 
 
-def quantize_scaled(t: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn) -> tuple[torch.Tensor, torch.Tensor]:
+def quantize_scaled(
+    t: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn, fp8_max: float | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize to FP8 with one FP32 scale for the whole tensor, so the largest value maps to
-    the top of the FP8 range. Returns the FP8 tensor and the scale."""
+    ``fp8_max``: by default the top of the FP8 range (448 for float8_e4m3fn). Returns the FP8
+    tensor and the scale."""
     limit = torch.finfo(dtype).max
+    if fp8_max is not None and not 0 < fp8_max <= limit:
+        raise ValueError(f"fp8_max must be in (0, {limit:g}] for {dtype}, got {fp8_max}")
     amax = abs_max(t)
-    scale = amax / limit if amax > 0 else 1.0
+    scale = amax / (fp8_max or limit) if amax > 0 else 1.0
     out = torch.empty(t.shape, dtype=dtype)
     src, dst = t.reshape(-1), out.reshape(-1)
     for start in range(0, src.numel(), CHUNK):
@@ -157,6 +167,26 @@ def reference_layers(header: Mapping[str, Mapping]) -> set[str]:
         elif key.endswith(".weight") and str(entry.get("dtype", "")).startswith("F8"):
             layers.add(key)
     return layers
+
+
+def reference_fp8_max(header: Mapping[str, Mapping], read: Callable[[str], torch.Tensor]) -> float | None:
+    """:data:`COMFY_ORG_FP8_MAX` if a reference file maps each layer's largest weight to 416, judged
+    from its two smallest FP8 weights with a per-tensor scale; otherwise None, for the default 448.
+    ``read(key)`` returns one tensor of the reference."""
+    sampled = []
+    for key, entry in header.items():
+        if not key.endswith(".weight") or entry.get("dtype") != "F8_E4M3":
+            continue
+        module = key[: -len(".weight")]
+        scale = next((header[module + s] for s in (".weight_scale", ".scale_weight") if module + s in header), None)
+        if scale is not None and math.prod(scale.get("shape", [])) == 1:
+            start, end = entry["data_offsets"]
+            sampled.append((end - start, key))
+    sampled = sorted(sampled)[:2]
+    if not sampled or sampled[-1][0] > 1 << 26:  # don't download big layers just for this
+        return None
+    tops = {read(key).float().abs().max().item() for _, key in sampled}
+    return COMFY_ORG_FP8_MAX if tops == {COMFY_ORG_FP8_MAX} else None
 
 
 def is_quantizable(key: str, state_dict: Mapping) -> bool:
