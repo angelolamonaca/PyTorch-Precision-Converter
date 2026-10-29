@@ -3,7 +3,7 @@
 [![Tests](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-orange)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/LICENSE)
 
 Make PyTorch checkpoints and `safetensors` files **half the size (a quarter with fp8)** by converting them to
 `fp16`, `bf16` or `fp8`, and strip the EMA weights you don't need for inference. One command, no model code
@@ -145,7 +145,7 @@ print(f"{report.converted} tensors converted, {len(report.clamped)} had values c
 - Checkpoints are loaded with `weights_only=True`. Use `--unsafe-load` for trusted files that need more.
 - Existing output files are no longer overwritten unless you pass `--overwrite`.
 
-See [CHANGELOG.md](CHANGELOG.md) for details.
+See [CHANGELOG.md](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/CHANGELOG.md) for details.
 
 ## Contributing
 
@@ -158,4 +158,4 @@ pytest
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/LICENSE).
