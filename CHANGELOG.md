@@ -6,6 +6,9 @@
 - `-p fp8_scaled`: ComfyUI's per-layer scaled FP8 format (`comfy_quant`, ComfyUI v0.4.0+). Linear weights get a
   per-tensor scale, which keeps small weights accurate where a plain fp8 cast loses them. Embeddings, norms,
   biases and convolutions stay in their original precision.
+- `--like REFERENCE` (a path or URL; only the header is read) quantizes exactly the layers that an official
+  fp8_scaled, int8 or fp8 file quantizes, for fine-tunes of models Comfy-Org has released, and renames tensors
+  to the reference's names when they differ by a prefix. `--rename OLD=NEW` renames by hand.
 - Scaled FP8 input is dequantized before converting: block-scaled FP8 (DeepSeek-V3/R1, Qwen3 FP8),
   compressed-tensors FP8, and all three ComfyUI layouts.
 - Model folders as input: every weight file is converted, shard indexes are rewritten, `config.json` gets the new

@@ -147,6 +147,18 @@ def comfy_quant_entry(dtype: torch.dtype) -> torch.Tensor:
     return torch.tensor(list(config.encode("utf-8")), dtype=torch.uint8)
 
 
+def reference_layers(header: Mapping[str, Mapping]) -> set[str]:
+    """The weights a quantized reference file stores in low precision, from its header: layers with
+    a ``comfy_quant`` entry (any format, FP8 or int8) and FP8 weights."""
+    layers = set()
+    for key, entry in header.items():
+        if key.endswith(".comfy_quant"):
+            layers.add(key[: -len(".comfy_quant")] + ".weight")
+        elif key.endswith(".weight") and str(entry.get("dtype", "")).startswith("F8"):
+            layers.add(key)
+    return layers
+
+
 def is_quantizable(key: str, state_dict: Mapping) -> bool:
     """Whether a tensor becomes scaled FP8 with ``-p fp8_scaled``: the 2-D weight of a Linear
     layer. Embedding tables and embedding projections (any key containing "embed") stay in

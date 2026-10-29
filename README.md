@@ -32,6 +32,7 @@ dequantized ones within FP8's rounding error (2.7%). It took 4 seconds and 262 M
 |---|---|
 | [Convert a model to fp16 or bf16](#convert-a-model-to-fp16-or-bf16) | `precision-convert model.safetensors -p fp16` |
 | [Make a ComfyUI `fp8_scaled` model](#make-a-comfyui-fp8_scaled-model) | `precision-convert model.safetensors -p fp8_scaled` |
+| [fp8_scaled of a fine-tune, like the official release](#make-an-fp8_scaled-file-of-a-fine-tune-like-the-official-release) | `precision-convert finetune.safetensors -p fp8_scaled --like OFFICIAL_URL` |
 | [Convert FP8 models to BF16 (DeepSeek, Qwen, ComfyUI)](#convert-fp8-models-to-bf16-deepseek-qwen-comfyui) | `precision-convert DeepSeek-V3/ -p bf16` |
 | [Convert a Hugging Face model folder](#convert-a-hugging-face-model-folder) | `precision-convert Llama-3.1-8B/ -p fp16` |
 | [Merge sharded safetensors into one file](#merge-sharded-safetensors-into-one-file) | `precision-convert model.safetensors.index.json -o model.safetensors` |
@@ -80,15 +81,39 @@ Works the same for `.ckpt`, `.pt`, `.pth` and `.bin` files. Without `-o`, the ou
 precision-convert flux1-dev.safetensors -p fp8_scaled -o flux1-dev-fp8_scaled.safetensors
 ```
 
-`fp8_scaled` stores each Linear weight as `float8_e4m3fn` with its own FP32 scale, in the per-layer
+`fp8_scaled` stores Linear weights as `float8_e4m3fn` with a per-tensor FP32 scale, in the per-layer
 `comfy_quant` format [documented by ComfyUI](https://github.com/Comfy-Org/ComfyUI/blob/master/QUANTIZATION.md).
 That is the format of Comfy-Org's own `*_fp8_scaled.safetensors` releases; ComfyUI hasn't published the tool it
 uses to make them. The file is half the size of bf16 and, unlike a plain fp8 cast, keeps small weights accurate
-([numbers below](#why-fp8_scaled-beats-a-plain-fp8-cast)). Biases, norms, convolutions and embeddings stay in their
-original precision, as in Comfy-Org's files. Add `--fallback bf16` to store those in bf16.
+([numbers below](#why-fp8_scaled-beats-a-plain-fp8-cast)). By default every Linear weight is quantized, while
+biases, norms, convolutions and embeddings stay in their original precision (`--fallback bf16` stores those in
+bf16).
 
 Put the file in `ComfyUI/models/diffusion_models` (or `text_encoders`) and load it with the default
 `weight_dtype`. Don't pick `fp8_e4m3fn` in the loader: the file is already FP8. Needs ComfyUI v0.4.0 or newer.
+
+### Make an fp8_scaled file of a fine-tune, like the official release
+
+Comfy-Org chooses the quantized layers per model by hand. In Gemma 4 E4B, for example, they quantize the MLPs and
+a few attention layers but leave the audio and vision towers in bf16. To make an fp8_scaled file of a fine-tune,
+uncensored or abliterated version of a model they have released, copy their choice with `--like`:
+
+```bash
+precision-convert gemma4_e4b_uncensored.safetensors -p fp8_scaled \
+  --like https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e4b_it_fp8_scaled.safetensors
+```
+
+`--like` takes a local file or a URL and reads only the header, so nothing big is downloaded. The reference can be
+fp8_scaled, int8 or plain fp8; its quantized layers become fp8_scaled in the output. When names differ only by a
+prefix, such as Hugging Face's `model.language_model.*` against ComfyUI's `model.*`, they are renamed to the
+reference's (`--rename OLD=NEW` does the same by hand). A shard index works as input, so a Hugging Face fine-tune
+becomes one ComfyUI file:
+
+```bash
+precision-convert Huihui-Qwen3-VL-8B-Instruct-abliterated/model.safetensors.index.json -p fp8_scaled \
+  --like https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
+  -o qwen3vl_8b_abliterated_fp8_scaled.safetensors
+```
 
 ### Convert FP8 models to BF16 (DeepSeek, Qwen, ComfyUI)
 
@@ -266,6 +291,8 @@ precision-convert INPUT [-p PRECISION] [-t TYPE] [-o OUTPUT] [options]
 | `--keep-original PATTERN` | Leave tensors whose name matches the glob in their original dtype. Repeatable. |
 | `--max-error E` | Store tensors whose relative error would exceed `E` at the `--fallback` precision. |
 | `--fallback PRECISION` | Precision for those tensors and, with `fp8_scaled`, for tensors that can't be FP8. Default: keep. |
+| `--like REFERENCE` | With `fp8_scaled`: quantize the layers a reference file quantizes, and rename to its names. Path or URL; reads only the header. |
+| `--rename OLD=NEW` | Replace a tensor name prefix. Repeatable. |
 | `--report` | Measure and list the tensors that lose the most precision. |
 | `--max-shard-size SIZE` | Split safetensors output into shards of at most `SIZE` (e.g. `5GB`) plus an index. |
 | `--skip-files GLOB` | Folder input: copy matching weight files unchanged. Repeatable. |

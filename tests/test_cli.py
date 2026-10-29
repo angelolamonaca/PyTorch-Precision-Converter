@@ -209,3 +209,44 @@ def test_version_mentions_torch(capsys):
     with pytest.raises(SystemExit):
         main(["--version"])
     assert "torch" in capsys.readouterr().out
+
+
+def test_like_copies_the_reference_layers(tmp_path, capsys):
+    q = torch.randn(8, 8).to(torch.float8_e4m3fn)
+    save_file({"a.weight": q, "a.weight_scale": torch.tensor(0.1),
+               "a.comfy_quant": torch.tensor(list(b'{"format": "float8_e4m3fn"}'), dtype=torch.uint8),
+               "b.weight": torch.randn(8, 8).bfloat16()}, tmp_path / "official.safetensors")
+    save_file({"a.weight": torch.randn(8, 8) * 0.02, "b.weight": torch.randn(8, 8) * 0.02}, tmp_path / "finetune.safetensors")
+    data = run_json([str(tmp_path / "finetune.safetensors"), "-p", "fp8_scaled", "--like", str(tmp_path / "official.safetensors")], capsys)
+    out = load_file(data["output"])
+    assert out["a.weight"].dtype == torch.float8_e4m3fn and out["b.weight"].dtype == torch.float32
+    assert data["scaled"] == 1
+
+
+def test_like_with_different_names_fails_clearly(tmp_path, capsys):
+    save_file({"x.weight": torch.randn(4, 4).to(torch.float8_e4m3fn)}, tmp_path / "ref.safetensors")
+    save_file({"a.weight": torch.randn(4, 4)}, tmp_path / "m.safetensors")
+    assert main([str(tmp_path / "m.safetensors"), "-p", "fp8_scaled", "--like", str(tmp_path / "ref.safetensors")]) == 1
+    assert "names differ" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main([str(tmp_path / "m.safetensors"), "-p", "bf16", "--like", str(tmp_path / "ref.safetensors")])
+
+
+def test_like_renames_to_the_reference_layout(tmp_path, capsys):
+    q = torch.randn(8, 8).to(torch.float8_e4m3fn)
+    save_file({"model.layers.0.q.weight": q, "model.layers.0.q.weight_scale": torch.tensor(0.1),
+               "model.layers.0.q.comfy_quant": torch.tensor(list(b'{"format": "float8_e4m3fn"}'), dtype=torch.uint8),
+               "model.norm.weight": torch.ones(8)}, tmp_path / "comfy.safetensors")
+    save_file({"model.language_model.layers.0.q.weight": torch.randn(8, 8) * 0.02,
+               "model.language_model.norm.weight": torch.ones(8)}, tmp_path / "hf.safetensors")
+    assert main([str(tmp_path / "hf.safetensors"), "-p", "fp8_scaled", "--like", str(tmp_path / "comfy.safetensors"),
+                 "-o", str(tmp_path / "out.safetensors")]) == 0
+    assert "Renaming 'model.language_model.' to 'model.'" in capsys.readouterr().out
+    assert set(load_file(tmp_path / "out.safetensors")) == {
+        "model.layers.0.q.weight", "model.layers.0.q.weight_scale", "model.layers.0.q.comfy_quant", "model.norm.weight"}
+
+
+def test_explicit_rename(tmp_path):
+    save_file({"model.language_model.w": torch.ones(2)}, tmp_path / "m.safetensors")
+    assert main([str(tmp_path / "m.safetensors"), "--rename", "model.language_model.=model.", "-o", str(tmp_path / "o.safetensors")]) == 0
+    assert list(load_file(tmp_path / "o.safetensors")) == ["model.w"]

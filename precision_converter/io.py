@@ -8,6 +8,7 @@ import os
 import pickle
 import re
 import struct
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,6 +137,68 @@ def tensor_shape(state_dict: Mapping, key: str) -> list[int] | None:
     return list(value.shape) if isinstance(value, torch.Tensor) else None
 
 
+class RenamedMapping(Mapping):
+    """A view of a state dict with key prefixes replaced, e.g. ``model.language_model.`` -> ``model.``.
+
+    ``rules`` maps old prefixes to new ones; the longest matching prefix wins."""
+
+    def __init__(self, inner: Mapping, rules: Mapping[str, str]):
+        self._inner = inner
+        ordered = sorted(rules.items(), key=lambda item: -len(item[0]))
+        self._old_by_new: dict[str, str] = {}
+        for key in inner:
+            new = next((n + key[len(o):] for o, n in ordered if key.startswith(o)), key)
+            if new in self._old_by_new:
+                raise ValueError(f"renaming maps both {self._old_by_new[new]!r} and {key!r} to {new!r}")
+            self._old_by_new[new] = key
+        self.metadata = getattr(inner, "metadata", None)
+
+    def __getitem__(self, key: str):
+        return self._inner[self._old_by_new[key]]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._old_by_new)
+
+    def __len__(self) -> int:
+        return len(self._old_by_new)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._old_by_new
+
+    def shape(self, key: str) -> list[int] | None:
+        return tensor_shape(self._inner, self._old_by_new[key])
+
+    def dtype(self, key: str) -> torch.dtype | None:
+        return tensor_dtype(self._inner, self._old_by_new[key])
+
+
+def infer_renames(state_dict: Mapping, reference: Mapping[str, Mapping]) -> dict[str, str]:
+    """Prefix replacements that turn the state dict's names into a reference header's names.
+
+    For each name missing from the reference, the reference name with the longest common ending
+    (at least two parts) and the same shape gives a rule such as ``model.language_model.`` ->
+    ``model.``. Only rules that are
+    consistent for every name they apply to are returned."""
+    by_suffix: dict[str, list[str]] = {}
+    for ref_key in reference:
+        parts = ref_key.split(".")
+        for i in range(len(parts)):
+            by_suffix.setdefault(".".join(parts[i:]), []).append(ref_key)
+    candidates: dict[str, set[str]] = {}
+    for key in state_dict:
+        if key in reference:
+            continue
+        parts = key.split(".")
+        for i in range(1, len(parts) - 1):  # keep at least two name parts, e.g. "q_proj.weight"
+            suffix = ".".join(parts[i:])
+            matches = [r for r in by_suffix.get(suffix, []) if list(reference[r].get("shape", [])) == tensor_shape(state_dict, key)]
+            if len(matches) == 1:
+                old = ".".join(parts[:i]) + "."
+                candidates.setdefault(old, set()).add(matches[0][: len(matches[0]) - len(suffix)])
+                break
+    return {old: next(iter(new)) for old, new in candidates.items() if len(new) == 1}
+
+
 @dataclass
 class Checkpoint:
     tensors: Mapping  # key -> tensor (or other value, for PyTorch checkpoints)
@@ -213,6 +276,36 @@ def load_checkpoint(
     """Load a state dict into memory and, for safetensors files, its metadata."""
     checkpoint = open_checkpoint(path, unsafe=unsafe, key=key)
     return dict(checkpoint.tensors.items()), checkpoint.metadata
+
+
+def read_header(source: str | os.PathLike) -> dict[str, dict]:
+    """The tensor entries of a safetensors header (name -> dtype, shape, offsets) without reading
+    any tensor data. ``source`` is a local .safetensors file, a local shard index, or an http(s) URL
+    of a .safetensors file, read with two small range requests."""
+    text = str(source)
+    if text.startswith(("http://", "https://")):
+        size = struct.unpack("<Q", _http_range(text, 0, 7))[0]
+        header = json.loads(_http_range(text, 8, 7 + size))
+    else:
+        path = Path(source)
+        if is_index_file(path):
+            header = {}
+            for name in ShardedSafetensors(path).shard_names:
+                header.update(read_header(path.parent / name))
+            return header
+        with open(path, "rb") as f:
+            size = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(size))
+    header.pop("__metadata__", None)
+    return header
+
+
+def _http_range(url: str, start: int, end: int) -> bytes:
+    request = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}", "User-Agent": "precision-convert"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        if response.status == 206:
+            return response.read()
+        return response.read(end + 1)[start:]  # the server ignored the range: read only the start
 
 
 def _tensor_bytes(tensor: torch.Tensor) -> memoryview:

@@ -9,7 +9,7 @@ import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Collection, Iterable
 
 import torch
 
@@ -49,6 +49,7 @@ def convert_folder(
     fallback: str = "keep",
     measure: bool = False,
     skip_files: Iterable[str] = (),
+    quantize_only: Collection[str] | None = None,
     unsafe: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> FolderReport:
@@ -94,7 +95,8 @@ def convert_folder(
         result.input_bytes += path.stat().st_size
         options = dict(
             precision=precision, conversion=conversion, keep_original=keep_original,
-            max_error=max_error, fallback=fallback, measure=measure, report=result.report,
+            max_error=max_error, fallback=fallback, measure=measure, quantize_only=quantize_only,
+            report=result.report,
         )
         if path.suffix == ".safetensors":
             own = open_checkpoint(path)

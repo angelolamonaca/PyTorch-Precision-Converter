@@ -24,7 +24,17 @@ from .core import (
     write_safetensors,
 )
 from .folder import convert_folder
-from .io import ShardedSafetensors, UnsafeCheckpointError, is_index_file, open_checkpoint, parse_size
+from .fp8 import reference_layers
+from .io import (
+    RenamedMapping,
+    ShardedSafetensors,
+    UnsafeCheckpointError,
+    infer_renames,
+    is_index_file,
+    open_checkpoint,
+    parse_size,
+    read_header,
+)
 
 REPO_URL = "https://github.com/angelolamonaca/PyTorch-Precision-Converter"
 STAR_LINE = f"⭐ If precision-convert saved you time, a GitHub star helps others find it: {REPO_URL}"
@@ -34,6 +44,8 @@ examples:
   precision-convert model.safetensors -p fp16                  halve the size
   precision-convert model.ckpt -p fp16 -t ema-only -st         SD training checkpoint -> EMA weights, fp16
   precision-convert flux.safetensors -p fp8_scaled             ComfyUI fp8_scaled (per-tensor scales)
+  precision-convert finetune.safetensors -p fp8_scaled --like https://huggingface.co/.../official_fp8_scaled.safetensors
+                                                               same layers as an official fp8_scaled release
   precision-convert DeepSeek-V3/ -p bf16                       FP8 Hugging Face model folder -> BF16, on CPU
   precision-convert model.safetensors.index.json -o model.safetensors       merge shards into one file
   precision-convert model.safetensors -o out/model.safetensors --max-shard-size 5GB   split into shards
@@ -111,6 +123,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[p for p in PRECISIONS if p != "fp8_scaled"],
         help="Precision for tensors rejected by --max-error and, with fp8_scaled, for tensors that can't be "
         "stored as scaled FP8 (norms, biases, convolutions). Default: keep their dtype.",
+    )
+    parser.add_argument(
+        "--like",
+        metavar="REFERENCE",
+        help="With fp8_scaled: quantize exactly the layers that this quantized file quantizes, e.g. Comfy-Org's "
+        "official fp8_scaled or int8 file of the same model. A local path or an https URL; only the header is read.",
+    )
+    parser.add_argument(
+        "--rename",
+        metavar="OLD=NEW",
+        action="append",
+        default=[],
+        help='Replace a tensor name prefix, e.g. "model.language_model.=model.". Repeatable. With --like, '
+        "prefixes that differ from the reference are found automatically.",
     )
     parser.add_argument("--report", action="store_true", help="Measure and list the tensors that lose the most precision.")
     parser.add_argument(
@@ -292,7 +318,7 @@ def run_folder(args: argparse.Namespace, parser: argparse.ArgumentParser, input_
         result = convert_folder(
             input_path, output, precision=args.precision, conversion=args.type,
             keep_original=args.keep_original, max_error=args.max_error, fallback=args.fallback,
-            measure=args.report, skip_files=args.skip_files, unsafe=args.unsafe_load,
+            measure=args.report, skip_files=args.skip_files, quantize_only=args.like_layers, unsafe=args.unsafe_load,
             progress=lambda name: console.say(f"Converting {name}"),
         )
     except (UnsafeCheckpointError, ValueError, OSError, RuntimeError) as e:
@@ -334,7 +360,27 @@ def main(argv: list[str] | None = None) -> int:
             max_shard_bytes = parse_size(args.max_shard_size)
         except ValueError as e:
             parser.error(str(e))
+    renames = {}
+    for rule in args.rename:
+        old, sep, new = rule.partition("=")
+        if not sep or not old:
+            parser.error(f"--rename takes OLD=NEW, got {rule!r}")
+        renames[old] = new
+    args.like_layers = None
+    reference = None
+    if args.like:
+        if args.precision != "fp8_scaled":
+            parser.error("--like only works with -p fp8_scaled")
+        try:
+            reference = read_header(args.like)
+            args.like_layers = reference_layers(reference)
+        except (OSError, ValueError) as e:
+            return console.error(f"can't read the header of {args.like}: {e}")
+        if not args.like_layers:
+            return console.error(f"{args.like} has no quantized layers to copy")
     if input_path.is_dir():
+        if renames:
+            parser.error("--rename works on files, not folders")
         return run_folder(args, parser, input_path, console)
     if args.skip_files:
         parser.error("--skip-files only works with a folder as input")
@@ -371,12 +417,34 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{output_path} already exists; pass --overwrite to replace it")
     if checkpoint.nested_key and checkpoint.nested_key != "state_dict":
         console.say(f"Using the weights under the {checkpoint.nested_key!r} key")
+    if reference is not None and not renames:
+        renames = infer_renames(checkpoint.tensors, reference)
+        for old, new in renames.items():
+            console.say(f"Renaming {old!r} to {new!r} to match the reference")
+    if renames:
+        try:
+            checkpoint.tensors = RenamedMapping(checkpoint.tensors, renames)
+        except ValueError as e:
+            return console.error(str(e))
+    if args.like_layers is not None:
+        found = args.like_layers & set(checkpoint.tensors)
+        if not found:
+            example = next(iter(sorted(args.like_layers)))
+            return console.error(
+                f"none of the {len(args.like_layers):,} layers quantized in {args.like} exist in {input_path}; "
+                f"the tensor names differ (the reference has e.g. {example!r})"
+            )
+        missing = len(args.like_layers) - len(found)
+        console.say(f"Copying the layer choice of {args.like}: {plural(len(found), 'layer')} to quantize")
+        if missing:
+            console.warn(f"{plural(missing, 'layer')} quantized in the reference {'is' if missing == 1 else 'are'} not in the input")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report = ConversionReport()
     entries = iter_convert(
         checkpoint.tensors, args.precision, args.type, args.keep_original,
-        max_error=args.max_error, fallback=args.fallback, measure=args.report, report=report,
+        max_error=args.max_error, fallback=args.fallback, measure=args.report,
+        quantize_only=args.like_layers, report=report,
     )
     try:
         if as_safetensors:

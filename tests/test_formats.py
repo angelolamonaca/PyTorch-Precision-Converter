@@ -252,3 +252,76 @@ def test_output_parses_the_way_comfyui_loads_it(tmp_path):
     restored = weight.to(torch.bfloat16) * scale.to(torch.bfloat16)
     assert ((restored.float() - w).norm() / w.norm()) < 0.05
     assert sd == {}
+
+
+# Copying a reference file's layer choice -------------------------------------------------------------
+
+
+def test_reference_layers_from_each_layout(tmp_path):
+    from precision_converter.fp8 import reference_layers
+    from precision_converter.io import read_header
+
+    q, scale = quantize_scaled(small_weights(4, 4))
+    comfy = {"a.weight": q, "a.weight_scale": scale,
+             "a.comfy_quant": torch.tensor(list(b'{"format": "int8_tensorwise"}'), dtype=torch.uint8),
+             "b.weight": torch.randn(4, 4).bfloat16()}
+    legacy = {"c.weight": q, "c.scale_weight": scale, "scaled_fp8": torch.empty(0, dtype=torch.float8_e4m3fn)}
+    plain = {"d.weight": q, "e.weight": torch.randn(4, 4)}
+    for name, sd, expected in (("comfy", comfy, {"a.weight"}), ("legacy", legacy, {"c.weight"}), ("plain", plain, {"d.weight"})):
+        write(tmp_path / f"{name}.safetensors", sd)
+        assert reference_layers(read_header(tmp_path / f"{name}.safetensors")) == expected
+
+
+def test_quantize_only_follows_the_reference():
+    sd = {"embed_tokens.weight": small_weights(10, 8), "q.weight": small_weights(8, 8), "k.weight": small_weights(8, 8)}
+    out, report = convert_state_dict(sd, "fp8_scaled", quantize_only={"embed_tokens.weight", "q.weight"})
+    assert out["embed_tokens.weight"].dtype == torch.float8_e4m3fn  # listed, so quantized despite the name
+    assert out["q.weight"].dtype == torch.float8_e4m3fn
+    assert out["k.weight"].dtype == torch.float32 and "k.weight_scale" not in out
+    assert report.scaled == 2
+
+
+def test_read_header_over_http(tmp_path, monkeypatch):
+    """Only the header is fetched, with range requests, even for a large remote file."""
+    import io as stdlib_io
+    import urllib.request
+
+    from precision_converter.io import read_header
+
+    write(tmp_path / "remote.safetensors", {"w": torch.zeros(1000, 1000)})
+    data = (tmp_path / "remote.safetensors").read_bytes()
+    requested = []
+
+    class Response(stdlib_io.BytesIO):
+        status = 206
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        start, end = map(int, request.headers["Range"].removeprefix("bytes=").split("-"))
+        requested.append(end - start + 1)
+        return Response(data[start : end + 1])
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert read_header("https://example.com/remote.safetensors")["w"]["shape"] == [1000, 1000]
+    assert sum(requested) < 1000  # never the 4 MB of tensor data
+
+
+def test_renamed_mapping_and_inference():
+    from precision_converter.io import RenamedMapping, infer_renames
+
+    hf = {"model.language_model.layers.0.mlp.weight": torch.zeros(4, 2), "model.visual.proj.weight": torch.zeros(3, 3),
+          "lm_head.weight": torch.zeros(5, 2)}
+    reference = {"model.layers.0.mlp.weight": {"shape": [4, 2]}, "model.visual.proj.weight": {"shape": [3, 3]},
+                 "lm_head.weight": {"shape": [5, 2]}}
+    rules = infer_renames(hf, reference)
+    assert rules == {"model.language_model.": "model."}
+    renamed = RenamedMapping(hf, rules)
+    assert set(renamed) == set(reference)
+    assert renamed.shape("model.layers.0.mlp.weight") == [4, 2]
+    with pytest.raises(ValueError, match="both"):
+        RenamedMapping({"a.x": torch.zeros(1), "b.x": torch.zeros(1)}, {"a.": "c.", "b.": "c."})

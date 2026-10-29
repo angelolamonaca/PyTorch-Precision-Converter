@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Collection, Iterable, Iterator
 
 import torch
 
@@ -135,6 +135,7 @@ def iter_convert(
     fallback: str = "keep",
     measure: bool = False,
     keys: Iterable[str] | None = None,
+    quantize_only: Collection[str] | None = None,
     report: ConversionReport | None = None,
 ) -> Iterator[tuple[str, object]]:
     """Yield the converted entries of a state dict one at a time.
@@ -188,7 +189,12 @@ def iter_convert(
             report.unchanged += 1
             continue
 
-        if precision == "fp8_scaled" and fp8.is_quantizable(key, {key: value}):
+        quantize = (
+            key in quantize_only and value.dim() >= 2
+            if quantize_only is not None
+            else fp8.is_quantizable(key, {key: value})
+        )
+        if precision == "fp8_scaled" and quantize:
             q, scale = fp8.quantize_scaled(value, dtype)
             error = fp8.relative_error(value, _restored(q, scale)) if measure else None
             if error is not None:
@@ -239,6 +245,7 @@ def convert_state_dict(
     max_error: float | None = None,
     fallback: str = "keep",
     measure: bool = False,
+    quantize_only: Collection[str] | None = None,
 ) -> tuple[dict[str, object], ConversionReport]:
     """Convert the floating-point tensors of a state dict to ``precision``.
 
@@ -249,13 +256,14 @@ def convert_state_dict(
 
     With ``measure``, the relative error of every converted tensor is recorded in the report.
     With ``max_error``, tensors whose error would exceed it are stored at ``fallback`` precision
-    instead ("keep" keeps their dtype).
+    instead ("keep" keeps their dtype). With ``fp8_scaled``, ``quantize_only`` names the weights to
+    quantize (for example from :func:`fp8.reference_layers`) instead of every Linear weight.
     """
     report = ConversionReport()
     converted = dict(
         iter_convert(
             state_dict, precision, conversion, keep_original,
-            max_error=max_error, fallback=fallback, measure=measure, report=report,
+            max_error=max_error, fallback=fallback, measure=measure, quantize_only=quantize_only, report=report,
         )
     )
     return converted, report
@@ -267,7 +275,7 @@ def output_size_bound(state_dict: Mapping, keys: Iterable[str], precision: str, 
     for key in keys:
         shape = tensor_shape(state_dict, key) or []
         entries.append((key, shape))
-        if precision == "fp8_scaled" and key.endswith(".weight") and len(shape) == 2:
+        if precision == "fp8_scaled" and key.endswith(".weight") and len(shape) >= 2:
             module = key[: -len(".weight")]
             entries += [(module + ".weight_scale", []), (module + ".comfy_quant", [64])]
     return header_size_bound(entries, metadata)
