@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0
+
+### Added
+- `-p int8_convrot`: ComfyUI's int8 ConvRot format (`int8_tensorwise` with `convrot`, ComfyUI v0.27.0+), the
+  format of Comfy-Org's `*_int8_convrot.safetensors` releases. Linear weights are rotated by a Hadamard matrix in
+  groups of 256 input features and stored as int8 with one FP32 scale per row. Rotation and rounding follow
+  comfy-kitchen's reference code: converting Comfy-Org's bf16 Qwen-Image 2.1 with `--like` their int8 file gives
+  back that file apart from rounding ties (99.99999% of int8 values identical, scales within 1 float32 ULP).
+- `--like` works with `-p int8_convrot` too, to make int8_convrot files of fine-tunes with the official layers.
+- ComfyUI int8 input (`int8_tensorwise`, with or without ConvRot) is dequantized, so `-p bf16` turns
+  int8_convrot files back into bf16; `--info` recognises them.
+- Python API: `quantize_convrot`.
+
 ## 2.1.0
 
 ### Added
