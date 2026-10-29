@@ -70,6 +70,13 @@ It also handles the details a quick script gets wrong:
 
 Times and peak memory footprint measured with `/usr/bin/time -l` on an Apple M3 Pro CPU with 18 GB of RAM.
 
+### Benchmarks: which file to load in ComfyUI
+
+Speed, VRAM and image fidelity of bf16, fp8, fp8_scaled, int8_convrot and NVFP4 files on Ampere, Ada and Blackwell
+GPUs (RTX 30/40/50-class), with every image, the per-image data and the scripts:
+[ComfyUI quantization benchmarks](https://huggingface.co/datasets/anla1234-itachi/comfyui-quant-bench). First model:
+MOSS-Image, where Comfy-Org's int8_convrot file was the fastest or close to it and the closest to bf16 on all three.
+
 ## How to
 
 ### Convert a model to fp16 or bf16
