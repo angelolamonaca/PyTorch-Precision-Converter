@@ -55,7 +55,7 @@ examples:
   precision-convert finetune.safetensors -p int8_convrot --like https://huggingface.co/.../official_int8_convrot.safetensors
                                                                ComfyUI int8_convrot, same layers as the official file
   precision-convert finetune.safetensors -p int8 --like https://huggingface.co/.../official_int8_convrot.safetensors
-                                                               the same layers as int8 without the rotation
+                                                               int8 without ConvRot: faster on a T4
   precision-convert DeepSeek-V3/ -p bf16                       FP8 Hugging Face model folder -> BF16, on CPU
   precision-convert model.safetensors.index.json -o model.safetensors       merge shards into one file
   precision-convert model.safetensors -o out/model.safetensors --max-shard-size 5GB   split into shards

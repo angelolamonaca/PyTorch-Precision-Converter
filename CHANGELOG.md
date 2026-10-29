@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.0
+
+### Added
+- `-p int8`: ComfyUI's int8 format without ConvRot (`int8_tensorwise` with one FP32 scale per row, ComfyUI v0.27.0+).
+  Values and scales are identical to comfy-kitchen's `quantize_int8_rowwise` on the FP32 weight. On a T4, MOSS-Image
+  made this way took 9% less time per image than Comfy-Org's int8_convrot file; on A10G, L40S and RTX PRO 6000 GPUs
+  int8_convrot was faster.
+- Python API: `quantize_int8`.
+
+### Fixed
+- `--like` copies the reference's per-layer settings (`<module>.config` entries). Comfy-Org's MOSS-Image int8 file has
+  42 of them, which switch ComfyUI to int8 attention; 2.2.0 left them out, so files made `--like` it ran with
+  ComfyUI's default attention, 2.3× slower on a T4 and 6–10% slower on newer GPUs. Converting Comfy-Org's bf16
+  MOSS-Image with `-p int8_convrot --like` their int8_convrot file now gives back that file apart from rounding ties.
+
 ## 2.2.0
 
 ### Added

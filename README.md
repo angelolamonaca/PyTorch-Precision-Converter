@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/LICENSE)
 
 Convert PyTorch checkpoints, `safetensors` files and whole Hugging Face model folders to **fp16, bf16, fp8 or
-ComfyUI `fp8_scaled` and `int8_convrot`**, turn **FP8 models (DeepSeek, Qwen) back into BF16 on a CPU**, merge or
+ComfyUI `fp8_scaled`, `int8_convrot` and `int8`**, turn **FP8 models (DeepSeek, Qwen) back into BF16 on a CPU**, merge or
 split **sharded safetensors**, and extract **EMA weights**, with one command and without loading the model into RAM.
 
 ```bash
@@ -34,6 +34,7 @@ dequantized ones within FP8's rounding error (2.7%). It took 4 seconds and 262 M
 | [Make a ComfyUI `fp8_scaled` model](#make-a-comfyui-fp8_scaled-model) | `precision-convert model.safetensors -p fp8_scaled` |
 | [fp8_scaled of a fine-tune, like the official release](#make-an-fp8_scaled-file-of-a-fine-tune-like-the-official-release) | `precision-convert finetune.safetensors -p fp8_scaled --like OFFICIAL_URL` |
 | [Make a ComfyUI `int8_convrot` model](#make-a-comfyui-int8_convrot-model) | `precision-convert finetune.safetensors -p int8_convrot --like OFFICIAL_URL` |
+| [Make a ComfyUI `int8` model for a T4](#make-a-comfyui-int8-model-for-a-t4) | `precision-convert finetune.safetensors -p int8 --like OFFICIAL_URL` |
 | [Convert FP8 models to BF16 (DeepSeek, Qwen, ComfyUI)](#convert-fp8-models-to-bf16-deepseek-qwen-comfyui) | `precision-convert DeepSeek-V3/ -p bf16` |
 | [Convert a Hugging Face model folder](#convert-a-hugging-face-model-folder) | `precision-convert Llama-3.1-8B/ -p fp16` |
 | [Merge sharded safetensors into one file](#merge-sharded-safetensors-into-one-file) | `precision-convert model.safetensors.index.json -o model.safetensors` |
@@ -66,11 +67,14 @@ It also handles the details a quick script gets wrong:
 | [Qwen3-VL 8B](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) text encoder, Comfy-Org's bf16 | → `fp8_scaled`, `--like` the official fp8_scaled ([Boogu-Image](https://huggingface.co/Comfy-Org/Boogu-Image)) | Unquantized tensors and 99.95% of FP8 bytes bit-identical to the official file, the rest rounding ties; 17.53 GB → 10.59 GB in 46 s |
 | [Qwen-Image 2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1), Comfy-Org's bf16 | → `fp8_scaled`, `--like` the int8 release | The int8 release's 192 layers in FP8, 2.65% mean error; 14.23 GB → 7.25 GB in 33 s, 0.77 GB peak memory |
 | [Qwen-Image 2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1), Comfy-Org's bf16 | → `int8_convrot`, `--like` the official int8_convrot | Same 649 tensors as the official file; every unquantized tensor and `comfy_quant` entry bit-identical, 99.99999% of int8 values identical (the other 644 of 7 billion are rounding ties), scales within 1 float32 ULP; 14.23 GB → 7.26 GB in 33 s, 0.65 GB peak memory |
+| [MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image), Comfy-Org's bf16 | → `int8_convrot`, `--like` the official int8_convrot | Same 757 tensors as the official file, including its 42 per-layer int8-attention settings; every unquantized tensor and `comfy_quant` entry bit-identical, 99.99999% of int8 values identical (the other 420 of 4.8 billion are rounding ties), scales within 1 float32 ULP; 10.16 GB → 5.41 GB |
+| [MOSS-Image](https://huggingface.co/Comfy-Org/MOSS-Image), Comfy-Org's bf16 | → `int8`, `--like` the official int8_convrot | The official file's layers and settings; every int8 value and scale identical to comfy-kitchen's own quantizer (`quantize_int8_rowwise` on the FP32 weights); 10.16 GB → 5.41 GB |
 | [Llama-3.1-8B-Lexi-Uncensored-V2](https://huggingface.co/Orenguteng/Llama-3.1-8B-Lexi-Uncensored-V2), 4 shards | → one `fp8_scaled` file, `--like` Comfy-Org's Llama 3.1 8B | Same 291 tensors, dtypes and shapes as the official file; 16.06 GB → 9.08 GB in 48 s, 0.81 GB peak memory |
 | [Huihui-Qwen3-VL-8B-Instruct-abliterated](https://huggingface.co/huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated), 4 shards | → one `fp8_scaled` file, `--like` Comfy-Org's Qwen3-VL 8B | Renamed to ComfyUI's names; same 1,254 tensors, dtypes and shapes as the official file; 17.53 GB → 10.59 GB in 45 s |
 | Comfy-Org `fp8_scaled` releases (Krea-2, Flux Krea) | header inspection | Uses the three layouts this tool reads and writes; tests cover each one |
 
-Times and peak memory footprint measured with `/usr/bin/time -l` on an Apple M3 Pro CPU with 18 GB of RAM.
+Times and peak memory footprint measured with `/usr/bin/time -l` on an Apple M3 Pro CPU with 18 GB of RAM. The
+MOSS-Image files were made on the benchmark machines.
 
 ### Benchmarks: which file to load in ComfyUI
 
@@ -78,6 +82,7 @@ Speed, VRAM and image fidelity of bf16, fp8, fp8_scaled, int8_convrot and NVFP4 
 GPUs (RTX 30/40/50-class), with every image, the per-image data and the scripts:
 [ComfyUI quantization benchmarks](https://huggingface.co/datasets/anla1234-itachi/comfyui-quant-bench). First model:
 MOSS-Image, where Comfy-Org's int8_convrot file was the fastest or close to it and the closest to bf16 on all three.
+On a T4, an `int8` file made with this tool beat it ([numbers](#make-a-comfyui-int8-model-for-a-t4)).
 
 ## How to
 
@@ -149,10 +154,40 @@ our [benchmark](#benchmarks-which-file-to-load-in-comfyui) it was the fastest fo
 to bf16, on Ampere, Ada and Blackwell GPUs.
 
 With `--like`, the same layers as Comfy-Org's int8 file are quantized, and the rotation and rounding follow
-comfy-kitchen's reference code: converting Comfy-Org's own bf16 Qwen-Image 2.1 gives back their int8_convrot file
-apart from rounding ties ([numbers](#tested-on-real-models)). Without `--like`, every Linear weight whose input size
+comfy-kitchen's reference code: converting Comfy-Org's own bf16 Qwen-Image 2.1 or MOSS-Image gives back their
+int8_convrot file apart from rounding ties ([numbers](#tested-on-real-models)). Without `--like`, every Linear weight whose input size
 is a multiple of 256 is quantized. The file needs ComfyUI v0.27.0 or newer (v0.30.0 when embeddings are quantized,
 as in Comfy-Org's int8 text encoders).
+
+`--like` also copies the reference's per-layer settings. Comfy-Org's newer int8 files, such as MOSS-Image's, carry
+`comfy_attention.config` entries that switch ComfyUI (v0.38.0+) to int8 attention in those layers. Without them, the
+same int8 MOSS-Image file took 2.3× longer per image on a T4 and 6–10% longer on A10G, L40S and RTX PRO 6000 GPUs.
+
+### Make a ComfyUI `int8` model for a T4
+
+```bash
+precision-convert moss_image_finetune.safetensors -p int8 \
+  --like https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/diffusion_models/moss_image_sft_int8_convrot.safetensors
+```
+
+`int8` is ComfyUI's int8 format without ConvRot: the same int8 weights with one FP32 scale per row, but no Hadamard
+rotation, so ComfyUI doesn't rotate the activations at every layer either. Values and scales are identical to
+comfy-kitchen's own quantizer run on the FP32 weights. The file needs ComfyUI v0.27.0 or newer.
+
+On a T4 that rotation costs more than it gains. MOSS-Image at 1024×1024, 25 steps, ComfyUI `0df1646`, on the same
+GPUs and prompts (median seconds per image, and median LPIPS against the bf16 image of the same prompt and seed):
+
+| GPU | bf16 | `int8_convrot` (Comfy-Org) | `int8` (this tool) |
+|---|---|---|---|
+| T4 | 671.7 s | 107.7 s · LPIPS 0.079 | **98.1 s** · 0.076 |
+| A10G | 45.0 s | **24.5 s** · 0.069 | 30.1 s · 0.104 |
+| L40S | 15.4 s | **7.7 s** · 0.045 | 9.6 s · 0.072 |
+| RTX PRO 6000 | 8.45 s | **4.63 s** · 0.067 | 5.40 s · 0.092 |
+
+On the T4, `int8` took 9% less time than `int8_convrot` and stayed about as close to bf16 (median LPIPS). On
+Ampere, Ada and Blackwell GPUs it took 17–25% longer and drifted further, so use `int8_convrot` there. A T4 has no
+bf16 hardware, so ComfyUI runs MOSS-Image in fp32 on it by default: both int8 files were over 6× faster than that,
+and `--fp16-unet` 5.5× (median LPIPS 0.011).
 
 ### Convert FP8 models to BF16 (DeepSeek, Qwen, ComfyUI)
 
@@ -311,6 +346,7 @@ itself, whatever the model size.
 | `bf16` | 2 | 3.4 × 10³⁸ | The safe 2-byte choice: same range as fp32, nothing overflows |
 | `fp16` | 2 | 65,504 | GPUs without fast bf16, and tools that expect fp16 |
 | `int8_convrot` | 1 (+ a scale per row) | 127 × scale | ComfyUI: in our benchmark the fastest or close to it, and the closest to bf16, on RTX 30, 40 and 50-class GPUs |
+| `int8` | 1 (+ a scale per row) | 127 × scale | ComfyUI on a T4: 9% faster than `int8_convrot` in our benchmark, slower on newer GPUs |
 | `fp8_scaled` | 1 (+ a scale per layer) | 448 × scale | ComfyUI: smallest files with the best fp8 quality |
 | `fp8_e4m3fn` | 1 | 448 | Tools that load plain fp8 weights; loses precision on small weights |
 | `fp8_e5m2` | 1 | 57,344 | Plain fp8 with more range and less precision |
@@ -325,14 +361,14 @@ precision-convert INPUT [-p PRECISION] [-t TYPE] [-o OUTPUT] [options]
 | Option | What it does |
 |---|---|
 | `INPUT` | A `.safetensors` file, a PyTorch checkpoint (`.ckpt`, `.pt`, `.pth`, `.bin`), a `*.safetensors.index.json`, or a model folder. |
-| `-p`, `--precision` | `fp32`, `fp16`, `bf16`, `fp8_e4m3fn`, `fp8_e5m2`, `fp8_scaled`, `int8_convrot`, or `keep` (default). |
+| `-p`, `--precision` | `fp32`, `fp16`, `bf16`, `fp8_e4m3fn`, `fp8_e5m2`, `fp8_scaled`, `int8`, `int8_convrot`, or `keep` (default). |
 | `-t`, `--type` | `full` (default), `ema-only` (use the EMA weights) or `no-ema` (drop them). |
 | `-o`, `--output` | Output file or folder. The extension picks the format: `.safetensors` or PyTorch. |
 | `-st`, `--safe-tensors` | Save as safetensors (the default for safetensors input). |
 | `--keep-original PATTERN` | Leave tensors whose name matches the glob in their original dtype. Repeatable. |
 | `--max-error E` | Store tensors whose relative error would exceed `E` at the `--fallback` precision. |
-| `--fallback PRECISION` | Precision for those tensors and, with `fp8_scaled` or `int8_convrot`, for tensors that can't be quantized. Default: keep. |
-| `--like REFERENCE` | With `fp8_scaled` or `int8_convrot`: quantize the layers a reference file quantizes, and rename to its names. Path or URL; reads only the header and two small layers. |
+| `--fallback PRECISION` | Precision for those tensors and, with `fp8_scaled`, `int8` or `int8_convrot`, for tensors that can't be quantized. Default: keep. |
+| `--like REFERENCE` | With `fp8_scaled`, `int8` or `int8_convrot`: quantize the layers a reference file quantizes, and rename to its names. Path or URL; reads only the header and two small layers. |
 | `--rename OLD=NEW` | Replace a tensor name prefix. Repeatable. |
 | `--report` | Measure and list the tensors that lose the most precision. |
 | `--max-shard-size SIZE` | Split safetensors output into shards of at most `SIZE` (e.g. `5GB`) plus an index. |
