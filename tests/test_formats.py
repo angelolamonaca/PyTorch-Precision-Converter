@@ -457,6 +457,21 @@ def test_read_tensor_over_http(tmp_path, http_files):
     assert sum(sent) < 1000
 
 
+def test_read_tensors_over_http_groups_close_tensors(tmp_path, http_files):
+    """The header is read once; tensors less than 1 MB apart share a request; a large one between them is skipped."""
+    from precision_converter.io import read_tensors
+
+    files, sent = http_files
+    configs = {f"layers.{i}.comfy_attention.config": torch.tensor(list(b'{"attention": "x"}'), dtype=torch.uint8)
+               for i in range(3)}
+    write(tmp_path / "remote.safetensors", {"big": torch.zeros(1000, 1000), "empty": torch.zeros(0), **configs})
+    files["https://example.com/remote.safetensors"] = (tmp_path / "remote.safetensors").read_bytes()
+    got = read_tensors("https://example.com/remote.safetensors", [*configs, "empty"])
+    assert set(got) == {*configs, "empty"} and got["empty"].shape == (0,)
+    assert all(torch.equal(got[k], v) for k, v in configs.items())
+    assert len(sent) == 3 and sum(sent) < 2000  # 8-byte size, header, one range for the configs
+
+
 def test_renamed_mapping_and_inference():
     from precision_converter.io import RenamedMapping, infer_renames
 

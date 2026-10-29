@@ -275,6 +275,10 @@ def test_int8_like_an_int8_convrot_reference(tmp_path, capsys, precision, group_
             "c.weight": torch.randn(8, 256) * 0.02, "norm.weight": torch.ones(16)}
     official = {"norm.weight": base["norm.weight"], "c.weight": base["c.weight"]}  # c stays unquantized, like Comfy-Org's choice
     expected = dict(official)
+    # Per-layer settings travel with --like, for modules the output has: int8 attention for "a", nothing for "gone".
+    int8_attention = torch.tensor(list(b'{"attention": "comfy_kitchen_int8"}'), dtype=torch.uint8)
+    official["a.comfy_attention.config"] = expected["a.comfy_attention.config"] = int8_attention
+    official["gone.comfy_attention.config"] = int8_attention.clone()
     for module in ("a", "b"):
         q, scale = int8.quantize_convrot(base[module + ".weight"])
         official.update({module + ".weight": q, module + ".weight_scale": scale, module + ".comfy_quant": int8.comfy_quant_entry()})
@@ -285,7 +289,9 @@ def test_int8_like_an_int8_convrot_reference(tmp_path, capsys, precision, group_
     save_file(official, tmp_path / "official.safetensors")
     assert main([str(tmp_path / "base.safetensors"), "-p", precision, "--like", str(tmp_path / "official.safetensors"),
                  "-o", str(tmp_path / "out.safetensors")]) == 0
-    assert f"Stored 2 weights as {precision} (ComfyUI format, needs ComfyUI v0.27.0+)" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "Copying 1 per-layer setting of the reference (attention: comfy_kitchen_int8)" in printed
+    assert f"Stored 2 weights as {precision} (ComfyUI format, needs ComfyUI v0.27.0+)" in printed
     out = load_file(tmp_path / "out.safetensors")
     assert set(out) == set(expected)
     assert all(out[k].dtype == v.dtype and torch.equal(out[k], v) for k, v in expected.items())

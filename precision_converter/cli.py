@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import statistics
 import sys
@@ -25,17 +26,19 @@ from .core import (
     write_safetensors,
 )
 from .folder import convert_folder
-from .fp8 import reference_fp8_max, reference_layers
+from .fp8 import reference_configs, reference_fp8_max, reference_layers
 from .io import (
     RenamedMapping,
     ShardedSafetensors,
     UnsafeCheckpointError,
+    header_size_bound,
     infer_renames,
     is_index_file,
     open_checkpoint,
     parse_size,
     read_header,
     read_tensor,
+    read_tensors,
 )
 
 REPO_URL = "https://github.com/angelolamonaca/PyTorch-Precision-Converter"
@@ -327,6 +330,31 @@ def print_info(path: Path, checkpoint, console: Console) -> None:
         print(f"  Metadata: {len(metadata)} entries ({', '.join(names[:8])}{', ...' if len(names) > 8 else ''})")
 
 
+def module_prefixes(keys) -> set[str]:
+    """Every module path that owns a tensor: "a", "a.b" for the key "a.b.weight"."""
+    prefixes = set()
+    for key in keys:
+        parts = key.split(".")
+        prefixes.update(".".join(parts[:i]) for i in range(1, len(parts)))
+    return prefixes
+
+
+def describe_configs(configs: dict[str, torch.Tensor]) -> str:
+    """The distinct settings of ``<module>.config`` entries, e.g. "attention: comfy_kitchen_int8"."""
+    values = set()
+    for value in configs.values():
+        try:
+            config = json.loads(bytes(value.tolist()))
+        except ValueError:
+            values.add("unreadable")
+            continue
+        if isinstance(config, dict):
+            values.update(f"{k}: {v}" for k, v in config.items())
+        else:
+            values.add(str(config))
+    return ", ".join(sorted(values))
+
+
 def run_folder(args: argparse.Namespace, parser: argparse.ArgumentParser, input_path: Path, console: Console) -> int:
     for flag, name in ((args.safe_tensors, "--safe-tensors"), (args.max_shard_size, "--max-shard-size"),
                        (args.key, "--key"), (args.info, "--info")):
@@ -337,6 +365,9 @@ def run_folder(args: argparse.Namespace, parser: argparse.ArgumentParser, input_
         parser.error(f"{output} already exists; pass --overwrite to replace it")
     if args.fp8_max:
         console.say(FP8_MAX_LINE.format(args.fp8_max))
+    if args.like_configs:
+        console.warn(f"the reference's {plural(len(args.like_configs), 'per-layer setting')} (e.g. "
+                     f"{next(iter(args.like_configs))}) can only be copied into a single file, not a folder")
     try:
         result = convert_folder(
             input_path, output, precision=args.precision, conversion=args.type,
@@ -390,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--rename takes OLD=NEW, got {rule!r}")
         renames[old] = new
     args.like_layers = None
+    args.like_configs = {}
     args.fp8_max = None
     args.int8_embeddings = False
     reference = None
@@ -409,6 +441,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.fp8_max = reference_fp8_max(reference, lambda key: read_tensor(args.like, key))
             except (OSError, ValueError, KeyError) as e:
                 console.warn(f"can't read a layer of {args.like} ({e}); FP8 weights get the default scaling")
+        configs = reference_configs(reference)
+        if configs:
+            try:
+                args.like_configs = read_tensors(args.like, configs)
+            except (OSError, ValueError, KeyError) as e:
+                console.warn(f"can't read the per-layer settings of {args.like} ({e}); the output gets ComfyUI's defaults")
     if input_path.is_dir():
         if renames:
             parser.error("--rename works on files, not folders")
@@ -471,6 +509,12 @@ def main(argv: list[str] | None = None) -> int:
             console.say(FP8_MAX_LINE.format(args.fp8_max))
         if missing:
             console.warn(f"{plural(missing, 'layer')} quantized in the reference {'is' if missing == 1 else 'are'} not in the input")
+    # Per-layer settings of the reference (such as int8 attention), for the modules the output has.
+    prefixes = module_prefixes(checkpoint.tensors) if args.like_configs else set()
+    configs = {key: value for key, value in args.like_configs.items()
+               if key not in checkpoint.tensors and key.rsplit(".", 2)[0] in prefixes}
+    if configs:
+        console.say(f"Copying {plural(len(configs), 'per-layer setting')} of the reference ({describe_configs(configs)})")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report = ConversionReport()
@@ -479,9 +523,12 @@ def main(argv: list[str] | None = None) -> int:
         max_error=args.max_error, fallback=args.fallback, measure=args.report,
         quantize_only=args.like_layers, fp8_max=args.fp8_max, report=report,
     )
+    if configs:
+        entries = itertools.chain(entries, configs.items())
     try:
         if as_safetensors:
             reserve = output_size_bound(checkpoint.tensors, list(checkpoint.tensors), args.precision, checkpoint.metadata)
+            reserve += header_size_bound(((key, list(value.shape)) for key, value in configs.items()), None)
             files, _, skipped = write_safetensors(
                 entries, output_path, reserve=reserve,
                 metadata=clean_metadata(checkpoint.metadata, args.precision), max_shard_bytes=max_shard_bytes,
@@ -510,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
     if console.json_mode:
         data = {"ok": True, "input": str(input_path), "output": str(output_path), "files": [str(f) for f in files],
                 "precision": args.precision, "type": args.type, **report_json(report),
-                "input_bytes": before, "output_bytes": after}
+                "settings_copied": len(configs), "input_bytes": before, "output_bytes": after}
         print(json.dumps(data, indent=2))
     elif not args.quiet:
         print(STAR_LINE, file=sys.stderr)
