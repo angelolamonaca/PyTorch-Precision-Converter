@@ -1,86 +1,161 @@
 # PyTorch Precision Converter
 
-![Badge](https://img.shields.io/badge/PyTorch-Converter-orange) ![Version](https://img.shields.io/badge/version-1.0.0-blue)
+[![Tests](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml/badge.svg)](https://github.com/angelolamonaca/PyTorch-Precision-Converter/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-orange)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Overview
+Make PyTorch checkpoints and `safetensors` files **half the size (a quarter with fp8)** by converting them to
+`fp16`, `bf16` or `fp8`, and strip the EMA weights you don't need for inference. One command, no model code
+needed, runs on the CPU.
 
-`PyTorch Precision Converter` is a robust utility tool designed to convert the tensor precision of PyTorch model checkpoints and `safetensors` files. With the increasing need for efficient model deployment on various platforms, especially where memory or computational efficiency is paramount, converting models to reduced precision formats like `fp16` or `bf16` can be immensely beneficial. This tool provides the flexibility to convert not just traditional PyTorch checkpoints but also models saved in the custom `safetensors` format.
+```console
+$ precision-convert model.ckpt -p fp16 -t ema-only -st
+Converted 280 tensors to fp16, left 1 unchanged, dropped 242 EMA entries
+Used the EMA weights for 240 tensors
+Saved model-ema-only-fp16.safetensors (29.93 MB, 27% of 109.23 MB)
+```
 
-Key features include:
-- Conversion of models to different precision formats.
-- Option to select between different model configurations, like full model, only the Exponential Moving Average (EMA) parameters, or excluding the EMA parameters.
-- Saving capability in both the custom `safetensors` format and the usual PyTorch checkpoint format.
+## Why not just call `.half()`?
 
-## Features
+A one-line cast quietly breaks things. This tool handles the details:
 
-- **Multiple Source Formats**: Load models from both PyTorch checkpoints and `safetensors` files.
-- **Precision Conversion**: Convert tensors to different precision formats: `fp32`, `fp16`, and `bf16`.
-- **Model Type Conversion**: Choose to convert:
-    - The full model
-    - Only the EMA parameters
-    - Exclude the EMA parameters
-- **Format Flexibility**: Save converted models in either the `safetensors` format or the standard PyTorch checkpoint format.
+- **Only floating-point tensors are cast.** Integer and bool tensors like `position_ids` or step counters keep
+  their dtype instead of turning into floats.
+- **No silent `inf` or `NaN`.** fp16 tops out at 65,504 and fp8 at 448. Values beyond the range are clamped
+  to it and you get a warning, rather than infinities appearing in your weights.
+- **Real EMA extraction.** `-t ema-only` puts the EMA weights where the model loads them from, for Stable
+  Diffusion and other latent-diffusion checkpoints (`model_ema.*`), then drops the duplicates.
+- **safetensors metadata survives.** LoRA training info (`ss_*` keys) and other metadata is copied to the output.
+- **Safe by default.** PyTorch checkpoints load with `weights_only=True`, so a malicious `.ckpt` can't run code.
+  Files that need full unpickling require an explicit `--unsafe-load`.
+- **Your files are safe too.** Output is written to a temporary file and moved into place when complete, the
+  input is never replaced, and existing files are only overwritten with `--overwrite`.
+- **Mixed precision when you need it.** `--keep-original "first_stage_model.*"` keeps matching tensors (here the
+  VAE) in their original dtype.
 
-## Requirements
+## Install
 
-- Python 3.7 or higher
-- PyTorch 1.7.0 or higher
-- `safetensors` library
+```bash
+pip install git+https://github.com/angelolamonaca/PyTorch-Precision-Converter
+```
 
-## Installation
-
-1. Clone the GitHub repository:
-    ```bash
-    git clone https://github.com/angelolamonaca/PyTorch-Precision-Converter.git
-    cd PyTorch-Precision-Converter
-    ```
-
-2. Install the required packages:
-    ```bash
-    pip install -r requirements.txt
-    ```
+This installs the `precision-convert` command (`python -m precision_converter` works too). It needs Python 3.9+,
+PyTorch 2.1+ and `safetensors`.
 
 ## Usage
 
-Use the converter through the command line:
-
 ```bash
-python converter.py -f <path_to_model> -p <precision> -t <conversion_type> -st
+precision-convert INPUT [-p PRECISION] [-t TYPE] [-st] [-o OUTPUT] [options]
 ```
 
-- `-f` or `--file`: Path to the model (PyTorch checkpoint or `safetensors` file). Default is `model.ckpt`.
-- `-p` or `--precision`: Desired tensor precision (`fp32`, `fp16`, or `bf16`). Default is `fp32`.
-- `-t` or `--type`: Conversion type (`full`, `ema-only`, `no-ema`). Default is `full`.
-- `-st` or `--safe-tensors`: Flag to save the model in `safetensors` format. By default, it saves in PyTorch format.
+| Option | What it does |
+|---|---|
+| `INPUT` | `.safetensors` file or PyTorch checkpoint (`.ckpt`, `.pt`, `.pth`, `.bin`). `-f INPUT` works too. |
+| `-p`, `--precision` | `fp32`, `fp16`, `bf16`, `fp8_e4m3fn`, `fp8_e5m2`, or `keep` (default: change no dtypes). |
+| `-t`, `--type` | `full` keeps everything (default). `ema-only` uses the EMA weights. `no-ema` drops the EMA weights. |
+| `-st`, `--safe-tensors` | Save as `.safetensors` instead of a PyTorch `.ckpt`. |
+| `-o`, `--output` | Output path; its extension picks the format. Default: `<input>-<type>-<precision>` next to the input. |
+| `--keep-original PATTERN` | Leave tensors whose key matches the glob in their original dtype. Repeatable. |
+| `--info` | Show the tensors, dtypes, sizes, EMA and metadata in the file, then exit. |
+| `--unsafe-load` | Fully unpickle PyTorch checkpoints. Only for files you trust. |
+| `--overwrite` | Replace the output file if it exists. |
+| `-v`, `--verbose` | List each tensor that had values clamped. |
 
-## Examples
+## Recipes
 
-Convert a model saved in `safetensors` format to half precision (`fp16`):
+**Shrink a Stable Diffusion training checkpoint for inference** (EMA weights, fp16, safetensors):
 
 ```bash
-python converter.py -f my_model.safetensors -p fp16
+precision-convert model.ckpt -p fp16 -t ema-only -st
 ```
 
-Convert only the EMA parameters of a PyTorch checkpoint to `bf16` and save in `safetensors` format:
+**Convert a LoRA to fp16 and keep its training metadata:**
 
 ```bash
-python converter.py -f my_model.ckpt -p bf16 -t ema-only -st
+precision-convert my-lora.safetensors -p fp16 -o my-lora-fp16.safetensors
 ```
+
+**Store a large model in fp8** for UIs that load fp8 weights, such as ComfyUI, keeping normalization layers
+precise:
+
+```bash
+precision-convert model.safetensors -p fp8_e4m3fn -st --keep-original "*norm*"
+```
+
+**Keep the VAE in fp32** (fp16 VAEs can produce NaNs and black images in some models):
+
+```bash
+precision-convert model.safetensors -p fp16 -st --keep-original "first_stage_model.*"
+```
+
+**Turn a pickled checkpoint into safetensors without changing precision:**
+
+```bash
+precision-convert model.ckpt -st
+```
+
+**Check what's inside a file before converting:**
+
+```console
+$ precision-convert model.ckpt --info
+model.ckpt: 523 tensors, 27,274,319 values, 109.10 MB
+  float32              521 tensors   109.10 MB
+  int64                  1 tensor        616 B
+  int32                  1 tensor          4 B
+  EMA: 242 model_ema.* tensors (-t ema-only or -t no-ema removes them)
+```
+
+## Which precision should I pick?
+
+| Precision | Bytes per value | Largest value | Good for |
+|---|---|---|---|
+| `fp32` | 4 | 3.4 × 10³⁸ | Training, reference copies, upcasting half-precision files |
+| `bf16` | 2 | 3.4 × 10³⁸ | The safe 2-byte choice: same range as fp32, so nothing overflows |
+| `fp16` | 2 | 65,504 | GPUs without fast bf16, and tools that expect fp16 |
+| `fp8_e4m3fn` | 1 | 448 | Smallest files, for inference in tools that load fp8 weights; some quality loss |
+| `fp8_e5m2` | 1 | 57,344 | fp8 with more range and less precision than `e4m3fn` |
+
+The fp8 options cast each value directly, without per-tensor scaling factors.
+
+## Python API
+
+```python
+from precision_converter import convert_state_dict, load_checkpoint, save_checkpoint
+
+state_dict, metadata = load_checkpoint("model.safetensors")
+converted, report = convert_state_dict(state_dict, precision="bf16", conversion="no-ema")
+save_checkpoint(converted, "model-bf16.safetensors", metadata=metadata)
+
+print(f"{report.converted} tensors converted, {len(report.clamped)} had values clamped")
+```
+
+`convert_state_dict` takes any mapping of tensors, so `model.state_dict()` works too.
+
+## Upgrading from 1.x
+
+`python convert.py ...` still works, but 2.0 fixes bugs that changed what earlier versions wrote:
+
+- `-t ema-only` used to keep the regular weights and store the EMA weights under keys no model loads. It now
+  outputs the actual EMA weights.
+- Integer tensors are no longer cast to floating point, and overflowing values are clamped instead of
+  becoming `inf`.
+- The default precision is now `keep`. `-p fp32` used to change nothing; it now converts fp16 and bf16 tensors
+  to fp32. With the default precision the output name no longer ends in `-fp32`.
+- Checkpoints are loaded with `weights_only=True`. Use `--unsafe-load` for trusted files that need more.
+- Existing output files are no longer overwritten unless you pass `--overwrite`.
+
+See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Contributing
 
-We welcome contributions to the `PyTorch Precision Converter`. If you wish to contribute, kindly follow the standard GitHub pull request process:
+Issues and pull requests are welcome. To run the tests:
 
-1. Fork the repository.
-2. Clone, create a new branch, make changes, and push them to your fork.
-3. Open a pull request.
-
-Ensure that your code adheres to the style and conventions of the existing codebase.
+```bash
+pip install -e ".[test]"
+pytest
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgements
-
-Special thanks to the PyTorch team and the OpenAI community for their continuous contributions to the machine learning ecosystem.
+MIT. See [LICENSE](LICENSE).

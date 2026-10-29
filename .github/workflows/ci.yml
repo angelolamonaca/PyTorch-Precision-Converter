@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+          - python: "3.13"
+          # Oldest versions the package supports.
+          - python: "3.9"
+            pins: "torch==2.1.0 safetensors==0.4.3 numpy<2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          pip install torch ${{ matrix.pins }} --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[test]" ${{ matrix.pins }}
+      - run: pytest -v

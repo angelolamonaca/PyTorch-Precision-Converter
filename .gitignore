@@ -99,3 +99,4 @@ Thumbs.db
 *.safetensors
 
 models
+.venv*/

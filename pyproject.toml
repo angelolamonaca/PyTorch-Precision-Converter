@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytorch-precision-converter"
+dynamic = ["version"]
+description = "Convert PyTorch checkpoints and safetensors files to fp16, bf16 or fp8 without breaking them."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Angelo Lamonaca" }]
+requires-python = ">=3.9"
+# numpy is only needed to unpickle older checkpoints that store numpy scalars.
+dependencies = ["torch>=2.1", "safetensors>=0.4.3", "numpy"]
+keywords = ["pytorch", "safetensors", "fp16", "bf16", "fp8", "checkpoint", "quantization", "stable-diffusion", "ema"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+precision-convert = "precision_converter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/angelolamonaca/PyTorch-Precision-Converter"
+Issues = "https://github.com/angelolamonaca/PyTorch-Precision-Converter/issues"
+Changelog = "https://github.com/angelolamonaca/PyTorch-Precision-Converter/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+packages = ["precision_converter"]
+
+[tool.setuptools.dynamic]
+version = { attr = "precision_converter.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
